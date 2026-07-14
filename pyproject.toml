@@ -1,22 +1,26 @@
 [project]
 name = "omni-forecast"
 version = "0.1.0"
-description = "Add your description here"
+description = "Station-grounded blending of multi-provider weather forecasts: bias correction, anchoring, and blending judged by a backtest leaderboard."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = []
+requires-python = ">=3.13"
+dependencies = [
+    "lightgbm>=4.6.0",
+    "numpy>=2.5.1",
+    "polars>=1.42.1",
+    "scipy>=1.18.0",
+    "scoringrules>=0.11.0",
+]
 
 license = { text = "Apache-2.0" }
 authors = [
     { name = "Harold Martin", email = "harold.martin@gmail.com" }
 ]
-requires-python = ">=3.13"
 classifiers = [
     "Development Status :: 3 - Alpha",
-    "Environment :: Web Environment",
-    "Framework :: AsyncIO",
-    "Framework :: Pydantic :: 2",
+    "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -29,15 +33,16 @@ classifiers = [
 keywords = [
     "weather",
     "forecast",
-    "api",
-    "aggregation",
-    "async",
-    "openweather",
-    "open-meteo",
-    "noaa",
+    "blending",
+    "ensemble",
+    "bias-correction",
+    "verification",
+    "nowcast",
     "meteorology",
-    "pydantic",
 ]
+
+[project.scripts]
+omni-forecast = "omni_forecast.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/hbmartin/omni-forecast"
@@ -68,7 +73,7 @@ docs = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "tests"]
 
 [tool.coverage.run]
 relative_files = true
@@ -109,6 +114,7 @@ lint.ignore = [
 "tests/**/*.py" = [
     "ANN",    # Type annotations not required in tests
     "D",      # Docstrings not required in tests
+    "INP001", # Test directories are not packages
     "S101",   # assert is expected in tests
     "SLF001", # Private member access is fine in tests
 ]
@@ -124,5 +130,7 @@ indent-style = "space"
 skip-magic-trailing-comma = false
 line-ending = "auto"
 
-[tool.deptry]
-known_first_party = ["omni_weather_forecast_apis"]
+[tool.deptry.per_rule_ignores]
+# lightgbm is imported dynamically (importlib) so the package stays importable
+# on platforms where its wheels lag; deptry cannot see the string import.
+DEP002 = ["lightgbm"]

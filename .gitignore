@@ -151,3 +151,8 @@ config.toml
 # Raw HTTP payload archives (contain provider URLs incl. API keys)
 raw/
 *.jsonl.gz
+
+# omni-forecast generated outputs (paths configurable in config.toml)
+data/
+reports/
+artifacts/
