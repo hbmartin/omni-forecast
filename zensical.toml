@@ -1,6 +1,6 @@
 [project]
 site_name = "omni-forecast"
-site_description = "Async Python library that fans out forecast requests across multiple weather providers and normalizes the results into one typed Pydantic schema."
+site_description = "Station-grounded blending of multi-provider weather forecasts: bias correction, anchoring, and blending judged by a backtest leaderboard."
 site_url = "https://hbmartin.github.io/omni-forecast/"
 repo_url = "https://github.com/hbmartin/omni-forecast"
 repo_name = "hbmartin/omni-forecast"
@@ -8,15 +8,16 @@ repo_name = "hbmartin/omni-forecast"
 nav = [
   { "Home" = "index.md" },
   { "Getting Started" = "getting-started.md" },
-  { "Configuration" = "configuration.md" },
-  { "Providers" = "providers.md" },
-  { "CLI" = "cli.md" },
-  { "Scheduling" = "scheduling.md" },
-  { "Database Design" = "database.md" },
-  { "Data Corrections" = "data-corrections.md" },
-  { "Future Work" = "future-work.md" },
-  { "Extending" = "extending.md" },
-  { "API Reference" = "api-reference.md" },
+  { "Advanced Usage" = "advanced-usage.md" },
+  { "Theory and Concepts" = "theory.md" },
+  { "Architecture" = "architecture.md" },
+  { "Limitations" = "limitations.md" },
+  { "Decisions" = [
+    { "SQLite files are the only upstream contract" = "adr/0001-sqlite-files-are-the-only-upstream-contract.md" },
+    { "Anchored nowcast, not disaggregation" = "adr/0002-anchored-nowcast-instead-of-temporal-disaggregation.md" },
+    { "Empirical truth-semantics calibration" = "adr/0003-empirical-truth-semantics-calibration.md" },
+    { "Grounding defaults to bias-only" = "adr/0004-grounding-defaults-to-bias-only.md" },
+  ] },
 ]
 
 [project.theme]

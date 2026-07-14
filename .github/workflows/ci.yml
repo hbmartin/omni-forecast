@@ -35,7 +35,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --dev --extra cli
+          uv sync --dev
 
       - name: Run Ruff check
         run: |
@@ -44,11 +44,6 @@ jobs:
       - name: Check Ruff formatting
         run: |
           uv run ruff format --check src tests
-
-      - name: Check repository policy patterns with Semgrep
-        run: |
-          uvx --from semgrep==1.169.0 semgrep scan --config semgrep_rules/ --error src .github/workflows
-          uvx --from semgrep==1.169.0 semgrep test semgrep_rules/
 
       - name: Run Pyrefly check
         run: |

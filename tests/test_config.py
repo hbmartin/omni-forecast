@@ -1,0 +1,160 @@
+from datetime import date
+from pathlib import Path
+
+import pytest
+
+from omni_forecast.config import ConfigError, load_config
+
+MINIMAL = """
+[station]
+db_path = "obs.db"
+latitude = 34.28
+longitude = -117.17
+
+[forecasts]
+db_path = "fx.sqlite"
+"""
+
+FULL = """
+[station]
+db_path = "obs.db"
+timezone = "America/Los_Angeles"
+latitude = 34.28
+longitude = -117.17
+elevation_m = 1400.0
+immutable = true
+
+[station.columns]
+solarrad = "solar"
+
+[station.units]
+solar = "wm2"
+
+[forecasts]
+db_path = "fx.sqlite"
+sources = ["open_meteo", "nws"]
+max_forecast_age_hours = 6.0
+
+[dataset]
+dir = "mydata"
+min_hour_coverage = 0.9
+
+[qc.bounds]
+solar = [0.0, 1500.0]
+
+[qc.max_step]
+temp = 4.0
+
+[backfill.open_meteo]
+models = ["gfs_seamless"]
+start_date = 2024-06-01
+
+[backtest]
+initial_train_days = 60
+
+[predict]
+selection = "pinned"
+[predict.methods]
+"hourly.temp_c" = "gbm"
+
+[reports]
+dir = "out/reports"
+
+[artifacts]
+dir = "out/artifacts"
+"""
+
+
+def write(tmp_path, text):
+    path = tmp_path / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+class TestMinimalConfig:
+    def test_defaults(self, tmp_path):
+        cfg = load_config(write(tmp_path, MINIMAL))
+        assert cfg.station.db_path == Path("obs.db")
+        assert cfg.station.timezone == "UTC"
+        assert cfg.station.columns["outTemp"] == "temp"
+        assert cfg.station.units["temp"] == "degF"
+        assert cfg.forecasts.sources == ()
+        assert cfg.forecasts.max_forecast_age_hours == 12.0
+        assert cfg.dataset.dir == Path("data")
+        assert cfg.dataset.pop_threshold_mm == 0.254
+        assert cfg.qc.bounds["temp"] == (-40.0, 55.0)
+        assert cfg.qc.max_step["temp"] == 5.0
+        assert cfg.qc.flatline_minutes["temp"] == 180
+        assert cfg.backfill.models == ()
+        assert cfg.backfill.start_date is None
+        assert cfg.backtest.initial_train_days == 90
+        assert cfg.predict.selection == "skill_per_slice"
+        assert cfg.predict.history_path == Path("data/predict_history.parquet")
+        assert cfg.reports_dir == Path("reports")
+        assert cfg.artifacts_dir == Path("artifacts")
+
+
+class TestFullConfig:
+    def test_overrides(self, tmp_path):
+        cfg = load_config(write(tmp_path, FULL))
+        assert cfg.station.immutable is True
+        assert cfg.station.elevation_m == 1400.0
+        assert cfg.station.columns["solarrad"] == "solar"
+        assert cfg.station.columns["outTemp"] == "temp"  # defaults preserved
+        assert cfg.station.units["solar"] == "wm2"
+        assert cfg.forecasts.sources == ("open_meteo", "nws")
+        assert cfg.dataset.dir == Path("mydata")
+        assert cfg.dataset.min_hour_coverage == 0.9
+        assert cfg.qc.bounds["solar"] == (0.0, 1500.0)
+        assert cfg.qc.max_step["temp"] == 4.0
+        assert cfg.backfill.models == ("gfs_seamless",)
+        assert cfg.backfill.start_date == date(2024, 6, 1)
+        assert cfg.backtest.initial_train_days == 60
+        assert cfg.backtest.step_days == 7  # default preserved
+        assert cfg.predict.selection == "pinned"
+        assert cfg.predict.methods["hourly.temp_c"] == "gbm"
+        assert cfg.reports_dir == Path("out/reports")
+
+
+class TestErrors:
+    def test_missing_file(self, tmp_path):
+        with pytest.raises(ConfigError, match="cannot load"):
+            load_config(tmp_path / "nope.toml")
+
+    def test_invalid_toml(self, tmp_path):
+        with pytest.raises(ConfigError, match="cannot load"):
+            load_config(write(tmp_path, "[station\n"))
+
+    def test_missing_required_key(self, tmp_path):
+        with pytest.raises(ConfigError, match="missing required key 'db_path'"):
+            load_config(write(tmp_path, "[station]\nlatitude=1.0\nlongitude=2.0\n"))
+
+    def test_bad_number(self, tmp_path):
+        text = MINIMAL.replace("latitude = 34.28", 'latitude = "north"')
+        with pytest.raises(ConfigError, match="must be a number"):
+            load_config(write(tmp_path, text))
+
+    def test_bad_bounds(self, tmp_path):
+        text = MINIMAL + "\n[qc.bounds]\ntemp = [1.0]\n"
+        with pytest.raises(ConfigError, match="must be \\[low, high\\]"):
+            load_config(write(tmp_path, text))
+
+    def test_bad_sources(self, tmp_path):
+        text = MINIMAL.replace(
+            'db_path = "fx.sqlite"', 'db_path = "fx.sqlite"\nsources = [1, 2]'
+        )
+        with pytest.raises(ConfigError, match="list of strings"):
+            load_config(write(tmp_path, text))
+
+    def test_bad_columns_map(self, tmp_path):
+        text = MINIMAL + "\n[station.columns]\noutTemp = 5\n"
+        with pytest.raises(ConfigError, match="table of strings"):
+            load_config(write(tmp_path, text))
+
+    def test_start_date_string_accepted(self, tmp_path):
+        text = (
+            MINIMAL
+            + '\n[backfill.open_meteo]\nmodels = []\nstart_date = "2024-01-02"\n'
+        )
+        cfg = load_config(write(tmp_path, text))
+        assert cfg.backfill.start_date == date(2024, 1, 2)
