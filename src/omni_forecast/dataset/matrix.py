@@ -34,6 +34,7 @@ from omni_forecast.contracts import (
     parse_fx_col,
     truth_col,
 )
+from omni_forecast.dataset.provider_qc import apply_provider_qc
 from omni_forecast.dataset.providers import (
     DAILY_COLUMN_MAP,
     HOURLY_COLUMN_MAP,
@@ -102,6 +103,12 @@ def build_hourly_matrix(
 ) -> pl.DataFrame:
     """One row per (issue snapshot, valid hour), sources wide, truth joined."""
     kind = assert_single_kind(hourly_long)
+    hourly_long = apply_provider_qc(
+        hourly_long,
+        config,
+        value_columns=HOURLY_MATRIX_VARIABLES,
+        group_key="valid_time",
+    )
     snap = snapshot_long(
         hourly_long, snapshots, config.forecasts.max_forecast_age_hours
     ).with_columns(
@@ -261,6 +268,12 @@ def build_daily_matrix(
 ) -> pl.DataFrame:
     """One row per (issue snapshot, target local date)."""
     kind = assert_single_kind(daily_long)
+    daily_long = apply_provider_qc(
+        daily_long,
+        config,
+        value_columns=DAILY_MATRIX_VARIABLES,
+        group_key="forecast_date",
+    )
     snap = snapshot_long(daily_long, snapshots, config.forecasts.max_forecast_age_hours)
     if snap.is_empty():
         return pl.DataFrame(

@@ -63,24 +63,38 @@ def truth_minute(minute_qc: pl.DataFrame, config: Config) -> pl.DataFrame:
     )
 
 
-def _precip_deltas(minute: pl.DataFrame) -> pl.DataFrame:
-    """Reset-aware per-sample precipitation increments from the rain counter.
+def _precip_deltas(minute: pl.DataFrame, reset_fraction: float) -> pl.DataFrame:
+    """Reset-aware, noise-tolerant per-sample precipitation increments.
 
-    A negative delta means the event counter reset; the new value is the
-    accumulation since reset. Deltas spanning gaps longer than the attribution
-    limit are unattributable to an hour and dropped (the coverage gate would
-    reject such hours anyway).
+    The event counter only climbs or resets toward zero, so:
+
+    - a rise is ordinary accumulation (``counter - previous``);
+    - a *large* drop, to below ``reset_fraction`` of the prior value, is a genuine
+      reset and the new value is the accumulation since it;
+    - a *small* dip (counter stays above that fraction) is sensor noise and adds no
+      rain.
+
+    Treating **every** decrease as a reset — the previous rule — turned a one-count
+    jitter into a full phantom rain event equal to the whole counter. Deltas
+    spanning gaps longer than the attribution limit are dropped as unattributable.
     """
     counter = pl.col("rain_counter_mm")
+    previous = counter.shift(1)
     gap_minutes = (pl.col("ts") - pl.col("ts").shift(1)).dt.total_seconds() / 60.0
+    delta = (
+        pl.when(previous.is_null())
+        .then(None)
+        .when(counter >= previous)
+        .then(counter - previous)
+        .when(counter < reset_fraction * previous)
+        .then(counter)
+        .otherwise(0.0)
+    )
     with_delta = (
         minute.filter(counter.is_not_null())
         .sort("ts")
         .with_columns(
-            pl.when(counter.diff() < 0)
-            .then(counter)
-            .otherwise(counter.diff())
-            .alias("precip_delta_mm"),
+            delta.alias("precip_delta_mm"),
             gap_minutes.alias("gap_minutes"),
         )
     )
@@ -166,7 +180,7 @@ def truth_hourly(minute: pl.DataFrame, config: Config) -> pl.DataFrame:
         )
     ).select("valid_hour", *(f"t__{variable}__inst" for variable in STATE_VARIABLES))
 
-    deltas = _precip_deltas(minute)
+    deltas = _precip_deltas(minute, config.dataset.precip_reset_fraction)
     rain_channel_cov = minute.group_by(
         pl.col("ts").dt.truncate("1h").alias("valid_hour")
     ).agg((_clean_minutes("rain_counter_mm") / _MINUTES_PER_HOUR).alias("precip_cov"))
@@ -221,7 +235,7 @@ def truth_daily(minute: pl.DataFrame, config: Config) -> pl.DataFrame:
             ],
         }
     )
-    deltas = _precip_deltas(minute).with_columns(
+    deltas = _precip_deltas(minute, config.dataset.precip_reset_fraction).with_columns(
         local_date_expr(pl.col("ts"), timezone).alias("date_local")
     )
     precip = deltas.group_by("date_local").agg(
