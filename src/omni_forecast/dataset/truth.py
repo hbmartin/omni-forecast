@@ -66,42 +66,51 @@ def truth_minute(minute_qc: pl.DataFrame, config: Config) -> pl.DataFrame:
 def _precip_deltas(minute: pl.DataFrame, reset_fraction: float) -> pl.DataFrame:
     """Reset-aware, noise-tolerant per-sample precipitation increments.
 
-    The event counter only climbs or resets toward zero, so:
-
-    - a rise is ordinary accumulation (``counter - previous``);
-    - a *large* drop, to below ``reset_fraction`` of the prior value, is a genuine
-      reset and the new value is the accumulation since it;
-    - a *small* dip (counter stays above that fraction) is sensor noise and adds no
-      rain.
-
-    Treating **every** decrease as a reset — the previous rule — turned a one-count
-    jitter into a full phantom rain event equal to the whole counter. Deltas
-    spanning gaps longer than the attribution limit are dropped as unattributable.
+    The event counter climbs monotonically within an event and resets toward zero
+    when the event ends, so within a *reset epoch* the true accumulation is the
+    counter's running maximum: rain is credited only when the counter exceeds the
+    highest value seen since the last reset. A dip-and-rebound (10.0 → 9.8 → 10.0)
+    therefore contributes nothing, and a genuine reset — a drop below
+    ``reset_fraction`` of the prior value — opens a new epoch whose value is the
+    accumulation since it. The previous rule credited *every* decrease as a full
+    reset, turning a one-count jitter into phantom rain. Deltas spanning gaps beyond
+    the attribution limit are dropped as unattributable.
     """
     counter = pl.col("rain_counter_mm")
     previous = counter.shift(1)
-    gap_minutes = (pl.col("ts") - pl.col("ts").shift(1)).dt.total_seconds() / 60.0
-    delta = (
-        pl.when(previous.is_null())
-        .then(None)
-        .when(counter >= previous)
-        .then(counter - previous)
-        .when(counter < reset_fraction * previous)
-        .then(counter)
-        .otherwise(0.0)
-    )
-    with_delta = (
+    ordered = (
         minute.filter(counter.is_not_null())
         .sort("ts")
         .with_columns(
-            delta.alias("precip_delta_mm"),
-            gap_minutes.alias("gap_minutes"),
+            (counter < reset_fraction * previous)
+            .fill_null(value=False)
+            .alias("_reset"),
+            previous.is_null().alias("_first"),
+            ((pl.col("ts") - pl.col("ts").shift(1)).dt.total_seconds() / 60.0).alias(
+                "gap_minutes"
+            ),
         )
+        .with_columns(pl.col("_reset").cast(pl.Int32).cum_sum().alias("_epoch"))
+        .with_columns(counter.cum_max().over("_epoch").alias("_epoch_max"))
+        .with_columns(pl.col("_epoch_max").shift(1).alias("_prev_epoch_max"))
     )
-    return with_delta.filter(
-        pl.col("precip_delta_mm").is_not_null()
-        & (pl.col("gap_minutes") <= _GAP_ATTRIBUTION_LIMIT_MINUTES)
-    ).select("ts", "precip_delta_mm")
+    delta = (
+        pl.when(pl.col("_first"))
+        .then(None)
+        .when(pl.col("_reset"))
+        .then(counter)
+        .when(counter > pl.col("_prev_epoch_max"))
+        .then(counter - pl.col("_prev_epoch_max"))
+        .otherwise(0.0)
+    )
+    return (
+        ordered.with_columns(delta.alias("precip_delta_mm"))
+        .filter(
+            pl.col("precip_delta_mm").is_not_null()
+            & (pl.col("gap_minutes") <= _GAP_ATTRIBUTION_LIMIT_MINUTES)
+        )
+        .select("ts", "precip_delta_mm")
+    )
 
 
 def _clean_minutes(variable: str) -> pl.Expr:

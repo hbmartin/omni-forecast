@@ -42,9 +42,12 @@ def _bounded(column: str, low: float, high: float) -> pl.Expr:
 
 
 def _mask_cross_source(
-    frame: pl.DataFrame, column: str, group_key: str, qc: ProviderQcConfig
+    frame: pl.DataFrame,
+    column: str,
+    group_key: str | Sequence[str],
+    qc: ProviderQcConfig,
 ) -> pl.DataFrame:
-    """Null values that are robust outliers among the sources sharing a valid time.
+    """Null values that are robust outliers among the sources sharing a snapshot.
 
     Intermediates (per-group median, absolute deviation, MAD, available count) are
     materialized as temporary columns so every window is a single, standard
@@ -87,17 +90,20 @@ def apply_provider_qc(
     config: Config,
     *,
     value_columns: Sequence[str],
-    group_key: str,
+    group_key: str | Sequence[str],
 ) -> pl.DataFrame:
     """Return ``frame`` with implausible provider values nulled per configuration.
 
     ``value_columns`` are the canonical forecast columns to check; ``group_key``
-    is the column (``valid_time`` for hourly, ``forecast_date`` for daily) over
-    which the cross-source comparison is made.
+    identifies one snapshot's set of sources — ``["issue_time", "valid_time"]``
+    for hourly and ``["issue_time", "forecast_date"]`` for daily — so the
+    cross-source comparison only ever weighs forecasts active at the same
+    snapshot, never mixing historical vintages of the same valid time.
     """
     qc = config.provider_qc
     if not qc.enabled or frame.is_empty():
         return frame
+    keys = [group_key] if isinstance(group_key, str) else list(group_key)
     present = [column for column in value_columns if column in frame.columns]
     result = frame
     if bound_exprs := [
@@ -106,9 +112,9 @@ def apply_provider_qc(
         if column in qc.bounds
     ]:
         result = result.with_columns(bound_exprs)
-    if group_key in result.columns:
+    if all(key in result.columns for key in keys):
         for column in present:
             if column in qc.cross_source_variables:
-                result = _mask_cross_source(result, column, group_key, qc)
+                result = _mask_cross_source(result, column, keys, qc)
     _log_nulled(frame, result, present)
     return result

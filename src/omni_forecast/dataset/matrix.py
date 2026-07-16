@@ -103,14 +103,14 @@ def build_hourly_matrix(
 ) -> pl.DataFrame:
     """One row per (issue snapshot, valid hour), sources wide, truth joined."""
     kind = assert_single_kind(hourly_long)
-    hourly_long = apply_provider_qc(
-        hourly_long,
+    # Provider QC runs AFTER the as-of snapshot join, grouped per snapshot, so the
+    # cross-source outlier test never compares different historical vintages of the
+    # same valid time (which would flag a genuine, freshly-forecast weather shift).
+    snap = apply_provider_qc(
+        snapshot_long(hourly_long, snapshots, config.forecasts.max_forecast_age_hours),
         config,
         value_columns=HOURLY_MATRIX_VARIABLES,
-        group_key="valid_time",
-    )
-    snap = snapshot_long(
-        hourly_long, snapshots, config.forecasts.max_forecast_age_hours
+        group_key=["issue_time", "valid_time"],
     ).with_columns(
         (
             (pl.col("valid_time") - pl.col("issue_time")).dt.total_seconds()
@@ -268,13 +268,12 @@ def build_daily_matrix(
 ) -> pl.DataFrame:
     """One row per (issue snapshot, target local date)."""
     kind = assert_single_kind(daily_long)
-    daily_long = apply_provider_qc(
-        daily_long,
+    snap = apply_provider_qc(
+        snapshot_long(daily_long, snapshots, config.forecasts.max_forecast_age_hours),
         config,
         value_columns=DAILY_MATRIX_VARIABLES,
-        group_key="forecast_date",
+        group_key=["issue_time", "forecast_date"],
     )
-    snap = snapshot_long(daily_long, snapshots, config.forecasts.max_forecast_age_hours)
     if snap.is_empty():
         return pl.DataFrame(
             schema={

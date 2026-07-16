@@ -346,7 +346,7 @@ def _dataset(raw: Mapping[str, Any]) -> DatasetConfig:
     )
 
 
-def _bounds_map(value: Any) -> dict[str, tuple[float, float]]:
+def _bounds_map(value: Any, section: str = "qc") -> dict[str, tuple[float, float]]:
     match value:
         case dict() as mapping:
             result: dict[str, tuple[float, float]] = {}
@@ -370,7 +370,7 @@ def _bounds_map(value: Any) -> dict[str, tuple[float, float]]:
                         raise ConfigError(msg)
             return result
         case _:
-            msg = "'bounds' in [qc] must be a table"
+            msg = f"'bounds' in [{section}] must be a table"
             raise ConfigError(msg)
 
 
@@ -408,7 +408,9 @@ def _deviation_map(value: Any) -> dict[str, float]:
 
 def _provider_qc(raw: Mapping[str, Any]) -> ProviderQcConfig:
     section = _section(raw, "provider_qc") if "provider_qc" in raw else {}
-    bounds = dict(DEFAULT_PROVIDER_QC_BOUNDS) | _bounds_map(section.get("bounds", {}))
+    bounds = dict(DEFAULT_PROVIDER_QC_BOUNDS) | _bounds_map(
+        section.get("bounds", {}), "provider_qc"
+    )
     min_deviation = dict(DEFAULT_PROVIDER_QC_MIN_DEVIATION) | _deviation_map(
         section.get("min_deviation", {})
     )
