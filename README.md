@@ -25,10 +25,13 @@ leaderboard.
    their *shared* bias is invisible to any weighting scheme; only correction
    removes it. A bias correction by default — the slope is opt-in, for reasons
    the data taught us (see [ADR 0004](https://hbmartin.github.io/grounded-weather-forecast/adr/0004-grounding-defaults-to-bias-only/)).
-2. **Blending** — combining grounded sources: equal weight, inverse-MSE,
-   gradient-boosted stacking, and online expert aggregation with sleeping
-   experts (ragged provider horizons need no special casing) and fixed share
-   (so a provider that silently swaps its backend model loses weight in days).
+2. **Blending** — combining grounded sources: equal weight, trimmed mean
+   (drops the extremes per row — robustness with zero parameters),
+   inverse-MSE and inverse-MAE weighting, gradient-boosted stacking, and
+   online expert aggregation with sleeping experts (ragged provider horizons
+   need no special casing) and fixed share (so a provider that silently swaps
+   its backend model loses weight in days). Grounding also comes in a
+   MAE-consistent median-intercept variant.
 3. **Anchoring** — short-lead correction toward the latest live observation,
    decaying exponentially with lead. Your thermometer is the one input no
    provider has.
@@ -75,6 +78,12 @@ grounded-weather-forecast build-dataset
 #    days) for open NWP models, tagged `synthetic` and never pooled with live.
 grounded-weather-forecast backfill --end 2026-07-12   # --models, --chunk-days
 
+#    A second backfill provider reads dynamical.org's free Zarr archives of
+#    FULL forecast cycles (GEFS since 2020, AIFS-ENS since 2025-07) at native
+#    3-6h steps — populating the sub-24h lead buckets Previous Runs cannot.
+#    Requires the optional dependencies: uv sync --group backfill
+grounded-weather-forecast backfill --provider dynamical --start 2026-06-01
+
 # 4. Study whether each hourly variable should use instantaneous or interval-mean
 #    truth. Misalignment masquerades as provider bias; this measures it.
 grounded-weather-forecast alignment
@@ -84,6 +93,18 @@ grounded-weather-forecast alignment
 grounded-weather-forecast backtest --source live       # or --source synthetic
 #   --methods all|<ids>  --products hourly,daily  --window expanding|rolling
 #   --hourly-variables ...  --daily-variables ...  --semantics auto|inst|mean
+
+# 5b. Optional: poll the Open-Meteo Ensemble API (GEFS, AIFS-ENS, AIGEFS, ...)
+#    and append per-model spread statistics to the ensembles parquet store.
+#    Real ensemble spread becomes leakage-safe ens__* feature columns in the
+#    hourly matrix — honest uncertainty the correlated provider columns cannot
+#    supply. Run at least once per model cycle; configure [ensembles].models.
+grounded-weather-forecast ingest-ensembles              # --models <ids>
+
+# 5c. Optional: cross-check station truth against lapse-adjusted Synoptic
+#    neighbors (free-signup token) and fit the radiation-shield error model.
+#    A drifting or decorrelating sensor alarms here before it poisons truth.
+grounded-weather-forecast truth-qc
 
 # 6. Leaderboards (per-slice skill with Diebold-Mariano, aggregate, winners,
 #    absolute error, consumer %-within-3F), the provider error-correlation
@@ -119,6 +140,10 @@ to serve from stale provider data rather than guessing.
   leakage defences
 - **[Limitations](https://hbmartin.github.io/grounded-weather-forecast/limitations/)** — what this cannot do, and the three real
   bugs the evaluation harness caught. **Read before trusting any number.**
+- **[Scheduling](https://hbmartin.github.io/grounded-weather-forecast/scheduling/)** — launchd templates and cadence rationale for the
+  polling, ensemble-ingest, predict, and nightly-retrain crons
+- [`docs/changes-0.3.0.md`](https://github.com/hbmartin/grounded-weather-forecast/blob/main/docs/changes-0.3.0.md) — 0.3.0 migration instructions and change
+  rationale (scoring semantics changed; re-run backtest before comparing)
 - [`CONTEXT.md`](https://github.com/hbmartin/grounded-weather-forecast/blob/main/CONTEXT.md) — project glossary (issue time, valid time, lead,
   grounding, anchoring, …)
 - [`docs/adr/`](https://github.com/hbmartin/grounded-weather-forecast/tree/main/docs/adr) — architecture decision records

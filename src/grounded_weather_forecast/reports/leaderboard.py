@@ -7,14 +7,22 @@ consumer-style percent-within-tolerance / PoP hit rate. The leaderboard never
 pools live and synthetic scores.
 """
 
+import json
 from collections.abc import Mapping
 
 import numpy as np
 import polars as pl
+from scipy import stats
 
 from grounded_weather_forecast.metrics.deterministic import bias, mae, pct_within, rmse
 from grounded_weather_forecast.metrics.dm import diebold_mariano
-from grounded_weather_forecast.metrics.probabilistic import brier
+from grounded_weather_forecast.metrics.probabilistic import (
+    brier,
+    crps_ensemble,
+    empirical_coverage,
+    pinball_loss,
+    pit_from_quantiles,
+)
 
 DEFAULT_REFERENCES: tuple[str, ...] = ("best_provider", "equal_weight")
 
@@ -33,6 +41,95 @@ CONSUMER_TOLERANCES: Mapping[str, float] = {
 }
 
 _MIN_DM_SAMPLES = 8
+_PIT_BINS = 10
+_PROBABILISTIC_EMPTY: Mapping[str, float | None] = {
+    "crps": None,
+    "pinball": None,
+    "coverage80": None,
+    "coverage90": None,
+    "pit_chi2_p": None,
+    "sharpness": None,
+}
+
+
+def _level_index(levels: list[float], target: float) -> int:
+    return int(np.argmin(np.abs(np.asarray(levels) - target)))
+
+
+def _probabilistic_columns(method_scores: pl.DataFrame) -> dict[str, float | None]:
+    """CRPS/pinball/coverage/PIT/sharpness from stored quantile grids.
+
+    Null for point-only methods. Wired per the improvement program: the
+    metrics were implemented and tested long before anything emitted a
+    distribution; this is where they finally reach the leaderboard.
+    """
+    empty = dict(_PROBABILISTIC_EMPTY)
+    if "quantiles_json" not in method_scores.columns:
+        return empty
+    with_quantiles = method_scores.drop_nulls("quantiles_json")
+    if with_quantiles.is_empty():
+        return empty
+    levels = json.loads(with_quantiles["quantile_levels_json"][0])
+    if not levels:
+        return empty
+    grids = np.asarray(
+        [
+            [np.nan if value is None else float(value) for value in json.loads(row)]
+            for row in with_quantiles["quantiles_json"].to_list()
+        ]
+    )
+    y = with_quantiles["y_true"].to_numpy().astype(np.float64)
+    usable = np.isfinite(grids).all(axis=1) & np.isfinite(y)
+    if int(usable.sum()) < _MIN_DM_SAMPLES:
+        return empty
+    grids, y = grids[usable], y[usable]
+    pinball = float(
+        np.mean([pinball_loss(y, grids[:, i], level) for i, level in enumerate(levels)])
+    )
+    pit = pit_from_quantiles(y, grids, tuple(levels))
+    counts, _ = np.histogram(pit, bins=_PIT_BINS, range=(0.0, 1.0))
+    return {
+        "crps": crps_ensemble(y, grids),
+        "pinball": pinball,
+        "coverage80": empirical_coverage(
+            y,
+            grids[:, _level_index(levels, 0.1)],
+            grids[:, _level_index(levels, 0.9)],
+        ),
+        "coverage90": empirical_coverage(
+            y,
+            grids[:, _level_index(levels, 0.05)],
+            grids[:, _level_index(levels, 0.95)],
+        ),
+        "pit_chi2_p": float(stats.chisquare(counts).pvalue),
+        "sharpness": float(
+            np.mean(
+                grids[:, _level_index(levels, 0.9)]
+                - grids[:, _level_index(levels, 0.1)]
+            )
+        ),
+    }
+
+
+def _collapsed_losses(paired: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """One mean absolute loss per valid_time, in temporal order.
+
+    Dozens of consecutive snapshots forecast the same valid hour, so raw
+    per-row losses are massively pseudo-replicated; collapsing makes the DM
+    variance see the real effective sample and its true autocorrelation axis.
+    """
+    collapsed = (
+        paired.group_by("valid_time")
+        .agg(
+            pl.col("loss_method").mean(),
+            pl.col("loss_reference").mean(),
+        )
+        .sort("valid_time")
+    )
+    return (
+        collapsed["loss_method"].to_numpy(),
+        collapsed["loss_reference"].to_numpy(),
+    )
 
 
 def _dm_columns(
@@ -42,27 +139,35 @@ def _dm_columns(
     lead_lo: float,
     product: str,
 ) -> tuple[float | None, float | None]:
-    """Skill and DM p-value of a method against one reference method."""
+    """Skill and DM p-value of a method against one reference method.
+
+    Compared on pairwise-common cases only, then collapsed per valid_time.
+    """
     reference_scores = slice_scores.filter(pl.col("method_id") == reference)
     if reference_scores.is_empty():
         return None, None
-    paired = method_scores.join(
-        reference_scores.select("issue_time", "valid_time", "y_pred", "y_true"),
-        on=("issue_time", "valid_time"),
-        how="inner",
-        suffix="_ref",
-    ).drop_nulls(["y_pred", "y_pred_ref"])
+    paired = (
+        method_scores.join(
+            reference_scores.select("issue_time", "valid_time", "y_pred", "y_true"),
+            on=("issue_time", "valid_time"),
+            how="inner",
+            suffix="_ref",
+        )
+        .drop_nulls(["y_pred", "y_pred_ref"])
+        .with_columns(
+            (pl.col("y_pred") - pl.col("y_true")).abs().alias("loss_method"),
+            (pl.col("y_pred_ref") - pl.col("y_true")).abs().alias("loss_reference"),
+        )
+    )
     if paired.height == 0:
         return None, None
-    y = paired["y_true"].to_numpy()
-    loss_method = np.abs(paired["y_pred"].to_numpy() - y)
-    loss_reference = np.abs(paired["y_pred_ref"].to_numpy() - y)
+    loss_method, loss_reference = _collapsed_losses(paired)
     reference_mae = float(loss_reference.mean())
     skill = 1.0 - float(loss_method.mean()) / reference_mae if reference_mae else None
-    if paired.height < _MIN_DM_SAMPLES:
+    if loss_method.shape[0] < _MIN_DM_SAMPLES:
         return skill, None
     lead_steps = lead_lo / 24.0 if product == "daily" else lead_lo
-    horizon_steps = max(1, min(int(lead_steps) + 1, 48, paired.height - 1))
+    horizon_steps = max(1, min(int(lead_steps) + 1, 48, loss_method.shape[0] - 1))
     result = diebold_mariano(loss_method, loss_reference, horizon_steps)
     return skill, result.p_value
 
@@ -74,27 +179,18 @@ def leaderboard(
     """Per (product, variable, lead bucket, method): every reported view."""
     rows: list[dict[str, object]] = []
     slice_keys = ("product", "variable", "lead_bucket")
-    for slice_key, raw_slice_scores in scores.partition_by(
+    cases = ["issue_time", "valid_time"]
+    for slice_key, slice_scores in scores.partition_by(
         list(slice_keys), as_dict=True
     ).items():
         product, variable, lead_bucket = (str(part) for part in slice_key)
-        methods = raw_slice_scores["method_id"].unique().sort().to_list()
-        n_methods = len(methods)
-        cases = ["issue_time", "valid_time"]
-        common_cases = (
-            raw_slice_scores.filter(pl.col("y_pred").is_not_null())
-            .group_by(cases)
-            .agg(pl.col("method_id").n_unique().alias("available_methods"))
-            .filter(pl.col("available_methods") == n_methods)
-            .select(cases)
-        )
-        n_total = raw_slice_scores.select(cases).unique().height
-        slice_scores = raw_slice_scores.join(common_cases, on=cases, how="inner")
-        if slice_scores.is_empty():
-            continue
+        methods = slice_scores["method_id"].unique().sort().to_list()
+        n_total = slice_scores.select(cases).unique().height
         lead_lo = float(np.min(slice_scores["lead_hours"].to_numpy()))
         tolerance = CONSUMER_TOLERANCES.get(variable)
         for method_id in methods:
+            # Each method is scored on its own non-null cases; only the DM
+            # comparison inside _dm_columns restricts to pairwise-common ones.
             method_scores = slice_scores.filter(
                 pl.col("method_id") == method_id
             ).drop_nulls("y_pred")
@@ -109,6 +205,7 @@ def leaderboard(
                 "method_id": method_id,
                 "n": method_scores.height,
                 "n_total": n_total,
+                "n_valid_times": method_scores["valid_time"].n_unique(),
                 "coverage": method_scores.height / n_total if n_total else 0.0,
                 "mae": mae(pred, y),
                 "rmse": rmse(pred, y),
@@ -117,6 +214,7 @@ def leaderboard(
                 if tolerance is not None
                 else None,
                 "brier": brier(pred, y) if variable == "pop" else None,
+                **_probabilistic_columns(method_scores),
             }
             for reference in references:
                 skill, p_value = (
@@ -159,14 +257,72 @@ def aggregate_leaderboard(board: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def slice_winners(board: pl.DataFrame) -> pl.DataFrame:
-    """Promote a challenger only with coverage and significant reference skill."""
+def _legacy_gate(
+    candidate: dict[str, object], reference: dict[str, object]
+) -> dict[str, object]:
+    reference_id = str(reference["method_id"])
+    skill = candidate.get(f"skill_vs_{reference_id}")
+    p_value = candidate.get(f"dm_p_vs_{reference_id}")
+    strong = (
+        isinstance(skill, (int, float))
+        and skill > 0.0
+        and isinstance(p_value, (int, float))
+        and p_value < 0.05
+    )
+    return candidate if strong else reference
+
+
+def _mcs_gate(
+    candidate: dict[str, object],
+    reference: dict[str, object],
+    slice_scores: pl.DataFrame,
+    alpha: float,
+) -> dict[str, object]:
+    """Promote only when the reference is *excluded* from the MCS.
+
+    A challenger inside the confidence set alongside the reference is
+    statistically indistinguishable from it — keep the reference. Thin data
+    yields a large set, so promotion defaults to the incumbent.
+    """
+    from grounded_weather_forecast.reports.mcs import (  # noqa: PLC0415
+        collapsed_loss_matrix,
+        model_confidence_set,
+    )
+
+    built = collapsed_loss_matrix(slice_scores)
+    if built is None:
+        return _legacy_gate(candidate, reference)
+    matrix, methods = built
+    result = model_confidence_set(matrix, methods, alpha=alpha)
+    candidate_id = str(candidate["method_id"])
+    reference_id = str(reference["method_id"])
+    if result.contains(candidate_id) and not result.contains(reference_id):
+        return candidate
+    return reference
+
+
+def slice_winners(
+    board: pl.DataFrame,
+    scores: pl.DataFrame | None = None,
+    rule: str = "legacy",
+    alpha: float = 0.1,
+) -> pl.DataFrame:
+    """Promote a challenger only past the configured statistical gate.
+
+    ``rule="mcs"`` (with the raw ``scores``) uses the Model Confidence Set;
+    ``"legacy"`` keeps the single-DM gate. Coverage and effective-n gates
+    apply either way.
+    """
     if board.is_empty():
         return board
     winners: list[dict[str, object]] = []
     keys = ["product", "variable", "lead_bucket"]
-    for group in board.partition_by(keys, as_dict=True).values():
-        eligible = group.filter((pl.col("coverage") >= 0.8) & (pl.col("n") >= 8))
+    for slice_key, group in board.partition_by(keys, as_dict=True).items():
+        eligible = group.filter(
+            (pl.col("coverage") >= 0.8)
+            & (pl.col("n") >= 8)
+            & (pl.col("n_valid_times") >= 8)
+        )
         ranked = (eligible if not eligible.is_empty() else group).sort("mae")
         candidate = ranked.row(0, named=True)
         references = ranked.filter(pl.col("method_id").is_in(DEFAULT_REFERENCES))
@@ -175,11 +331,16 @@ def slice_winners(board: pl.DataFrame) -> pl.DataFrame:
             and not references.is_empty()
         ):
             reference = references.sort("mae").row(0, named=True)
-            reference_id = str(reference["method_id"])
-            skill = candidate.get(f"skill_vs_{reference_id}")
-            p_value = candidate.get(f"dm_p_vs_{reference_id}")
-            if skill is None or skill <= 0.0 or p_value is None or p_value >= 0.05:
-                candidate = reference
+            if rule == "mcs" and scores is not None:
+                product, variable, lead_bucket = slice_key
+                slice_scores = scores.filter(
+                    (pl.col("product") == product)
+                    & (pl.col("variable") == variable)
+                    & (pl.col("lead_bucket") == lead_bucket)
+                )
+                candidate = _mcs_gate(candidate, reference, slice_scores, alpha)
+            else:
+                candidate = _legacy_gate(candidate, reference)
         winners.append(candidate)
     return (
         pl.DataFrame(winners)

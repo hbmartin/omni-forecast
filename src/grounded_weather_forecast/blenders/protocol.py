@@ -6,7 +6,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from grounded_weather_forecast.contracts import BoolArray, FloatArray, TargetKind
+from grounded_weather_forecast.contracts import (
+    BoolArray,
+    FloatArray,
+    TargetKind,
+    VariableSpec,
+)
 from grounded_weather_forecast.leads import LeadBucket
 
 
@@ -33,13 +38,47 @@ def masked_average(
     return np.where(availability.any(axis=1), point, np.nan)
 
 
-def finalize_point(point: FloatArray, kind: TargetKind) -> FloatArray:
-    """Clip probability targets into [0, 1]; pass continuous through."""
+def finalize_point(
+    point: FloatArray, kind: TargetKind, variable: VariableSpec | None = None
+) -> FloatArray:
+    """Clip probability targets into [0, 1]; clamp declared variable bounds.
+
+    The bounds clamp mirrors the serve boundary, so the backtest scores the
+    quantity a user would actually receive — never a negative wind speed.
+    NaN (no prediction) passes through unchanged.
+    """
     match kind:
         case TargetKind.PROBABILITY:
-            return np.clip(point, 0.0, 1.0)
+            point = np.clip(point, 0.0, 1.0)
         case _:
-            return point
+            pass
+    if variable is None or (variable.minimum is None and variable.maximum is None):
+        return point
+    lower = -np.inf if variable.minimum is None else variable.minimum
+    upper = np.inf if variable.maximum is None else variable.maximum
+    return np.clip(point, lower, upper)
+
+
+def finalize_quantiles(
+    quantiles: FloatArray, kind: TargetKind, variable: VariableSpec | None = None
+) -> FloatArray:
+    """Monotone rearrangement plus the same clamps ``finalize_point`` applies.
+
+    Row-wise ``np.sort`` is the standard fix for quantile crossing: it never
+    worsens any proper scoring rule and guarantees emitted quantiles are a
+    valid distribution. Every quantile emitter must route through here.
+    """
+    ordered = np.sort(quantiles, axis=1)
+    match kind:
+        case TargetKind.PROBABILITY:
+            ordered = np.clip(ordered, 0.0, 1.0)
+        case _:
+            pass
+    if variable is None or (variable.minimum is None and variable.maximum is None):
+        return ordered
+    lower = -np.inf if variable.minimum is None else variable.minimum
+    upper = np.inf if variable.maximum is None else variable.maximum
+    return np.clip(ordered, lower, upper)
 
 
 @dataclass

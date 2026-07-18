@@ -18,6 +18,18 @@ type BoolArray = npt.NDArray[np.bool_]
 
 COLUMN_SEPARATOR = "__"
 
+# Deterministic context features (functions of the valid instant and the fixed
+# site only — leakage-safe by construction). One shared tuple so the matrix
+# builder and feature-consuming blenders can never drift apart.
+CONTEXT_FEATURE_COLUMNS: tuple[str, ...] = (
+    "solar_elevation_deg",
+    "toa_wm2",
+    "hour_sin",
+    "hour_cos",
+    "doy_sin",
+    "doy_cos",
+)
+
 
 class TargetKind(StrEnum):
     CONTINUOUS = "continuous"

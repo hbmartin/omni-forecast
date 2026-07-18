@@ -20,6 +20,7 @@ import polars as pl
 
 from grounded_weather_forecast.config import Config
 from grounded_weather_forecast.contracts import (
+    CONTEXT_FEATURE_COLUMNS,
     ForecastMatrix,
     MixedProvenanceError,
     Product,
@@ -33,6 +34,11 @@ from grounded_weather_forecast.contracts import (
     obs_col,
     parse_fx_col,
     truth_col,
+)
+from grounded_weather_forecast.dataset.ensembles import (
+    ensemble_features,
+    ensembles_path,
+    load_ensembles,
 )
 from grounded_weather_forecast.dataset.provider_qc import apply_provider_qc
 from grounded_weather_forecast.dataset.providers import (
@@ -50,6 +56,7 @@ from grounded_weather_forecast.dataset.truth import (
     truth_minute,
 )
 from grounded_weather_forecast.leads import daily_bucket_expr, hourly_bucket_expr
+from grounded_weather_forecast.solar import solar_elevation_deg, toa_irradiance_wm2
 from grounded_weather_forecast.timeutil import local_date_expr, local_day_minutes
 
 _SECONDS_PER_HOUR = 3600.0
@@ -94,14 +101,74 @@ def _pivot(
     )
 
 
+_TREND_MEDIAN_MINUTES = 5
+_TREND_SPAN_MINUTES = 10
+
+
+def _observation_trends(truth_minute_frame: pl.DataFrame) -> pl.DataFrame:
+    """Spike-guarded issue-time observation tendency, in units per hour.
+
+    Slope between two 5-minute rolling medians ten minutes apart: robust to a
+    single spike, and exactly the derivative a trend-aware anchor needs.
+    Windows are row-counted at the station's ~1-minute cadence; the 30-minute
+    join tolerance bounds how stale a gap can make the estimate.
+    """
+    ordered = truth_minute_frame.sort("ts")
+    smoothed = {
+        v: pl.col(v).rolling_median(window_size=_TREND_MEDIAN_MINUTES)
+        for v in OBS_VARIABLES
+    }
+    return ordered.select(
+        "ts",
+        *(
+            (
+                (median - median.shift(_TREND_SPAN_MINUTES))
+                / (_TREND_SPAN_MINUTES / 60.0)
+            ).alias(f"{obs_col(v)}__trend15m")
+            for v, median in smoothed.items()
+        ),
+    )
+
+
+def _with_cyclical_and_solar(frame: pl.DataFrame, config: Config) -> pl.DataFrame:
+    """Deterministic phase features: solar geometry + wrapped calendar."""
+    if frame.is_empty():
+        return frame
+    epoch = frame["valid_time"].dt.epoch(time_unit="s").to_numpy().astype(np.float64)
+    latitude, longitude = config.station.latitude, config.station.longitude
+    doy = (
+        pl.col("valid_time")
+        .dt.convert_time_zone(config.station.timezone)
+        .dt.ordinal_day()
+    )
+    hour_angle = 2.0 * np.pi * pl.col("valid_hour_local") / 24.0
+    doy_angle = 2.0 * np.pi * doy / 365.25
+    return frame.with_columns(
+        pl.Series(
+            "solar_elevation_deg", solar_elevation_deg(epoch, latitude, longitude)
+        ),
+        pl.Series("toa_wm2", toa_irradiance_wm2(epoch, latitude, longitude)),
+        hour_angle.sin().alias("hour_sin"),
+        hour_angle.cos().alias("hour_cos"),
+        doy_angle.sin().alias("doy_sin"),
+        doy_angle.cos().alias("doy_cos"),
+    )
+
+
 def build_hourly_matrix(
     hourly_long: pl.DataFrame,
     snapshots: pl.DataFrame,
     truth_hourly_frame: pl.DataFrame,
     truth_minute_frame: pl.DataFrame,
     config: Config,
+    ensembles: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
-    """One row per (issue snapshot, valid hour), sources wide, truth joined."""
+    """One row per (issue snapshot, valid hour), sources wide, truth joined.
+
+    ``ensembles`` is the long statistics store from
+    :mod:`grounded_weather_forecast.dataset.ensembles`; its as-of view joins in
+    as ``ens__*`` feature columns (spread information, never a source).
+    """
     kind = assert_single_kind(hourly_long)
     # Provider QC runs AFTER the as-of snapshot join, grouped per snapshot, so the
     # cross-source outlier test never compares different historical vintages of the
@@ -146,7 +213,7 @@ def build_hourly_matrix(
         "ts", *(pl.col(v).alias(obs_col(v)) for v in OBS_VARIABLES)
     )
     timezone_name = config.station.timezone
-    return (
+    joined = (
         wide.join(ages, on="issue_time", how="left")
         .sort("issue_time")
         .join_asof(
@@ -157,7 +224,23 @@ def build_hourly_matrix(
             tolerance=_OBS_TOLERANCE,
         )
         .drop("ts")
-        .join(
+        .join_asof(
+            _observation_trends(truth_minute_frame),
+            left_on="issue_time",
+            right_on="ts",
+            strategy="backward",
+            tolerance=_OBS_TOLERANCE,
+        )
+        .drop("ts")
+    )
+    if ensembles is not None and not ensembles.is_empty():
+        spread = ensemble_features(
+            ensembles, snapshots, config.forecasts.max_forecast_age_hours
+        )
+        if not spread.is_empty():
+            joined = joined.join(spread, on=["issue_time", "valid_time"], how="left")
+    return (
+        joined.join(
             truth_hourly_frame.rename({"valid_hour": "valid_time"}),
             on="valid_time",
             how="left",
@@ -180,6 +263,7 @@ def build_hourly_matrix(
             .alias("valid_month"),
         )
         .with_columns(hourly_bucket_expr(pl.col("lead_hours")).alias("lead_bucket"))
+        .pipe(_with_cyclical_and_solar, config)
         .sort("issue_time", "valid_time")
     )
 
@@ -406,8 +490,14 @@ def write_dataset(config: Config) -> DatasetManifest:
     minutely_long = archive.minutely
     snapshots = snapshot_times(archive.completions)
 
+    ensembles = load_ensembles(ensembles_path(config))
     hourly_matrix = build_hourly_matrix(
-        hourly_long, snapshots, hourly_truth, causal_minute, config
+        hourly_long,
+        snapshots,
+        hourly_truth,
+        causal_minute,
+        config,
+        ensembles=ensembles,
     )
     daily_matrix = build_daily_matrix(
         daily_long_frame, snapshots, hourly_matrix, daily_truth, config
@@ -520,14 +610,35 @@ def _synthetic_daily_matrix(
     )
 
 
+def merged_synthetic_long(config: Config, synthetic_long: pl.DataFrame) -> pl.DataFrame:
+    """New backfill rows merged with the stored synthetic long frame.
+
+    Previous Runs and dynamical.org backfills coexist in one synthetic
+    archive; dedupe on (source, fetched_at, valid_time) keeps re-runs
+    idempotent. The provenance wall is untouched — everything here is
+    ``synthetic``.
+    """
+    existing_path = config.dataset.dir / "forecasts_long_synthetic.parquet"
+    if not existing_path.exists():
+        return synthetic_long
+    existing = pl.read_parquet(existing_path)
+    return (
+        pl.concat([existing, synthetic_long], how="diagonal_relaxed")
+        .unique(subset=["source", "fetched_at", "valid_time"], keep="last")
+        .sort("source", "fetched_at", "valid_time")
+    )
+
+
 def write_synthetic_matrix(
     config: Config, synthetic_long: pl.DataFrame
 ) -> tuple[Path, int]:
     """Build and persist the synthetic hourly matrix from a backfill long frame.
 
     Snapshot times come from the backfill's own synthetic fetch times, since a
-    backfilled archive has no ``forecast_runs`` rows to anchor to.
+    backfilled archive has no ``forecast_runs`` rows to anchor to. New rows
+    merge with any previously stored synthetic archive.
     """
+    synthetic_long = merged_synthetic_long(config, synthetic_long)
     _, hourly_truth, daily_truth = build_truth(config)
     causal_minute = build_observation_features(config)
     snapshots = (
@@ -602,8 +713,15 @@ def to_forecast_matrix(
     feature_columns = [
         c
         for c in usable.columns
-        if c in ("issue_time", "lead_bucket", "valid_hour_local", "valid_month")
-        or c.startswith(("age__", "obs__", "ewagg__"))
+        if c
+        in (
+            "issue_time",
+            "lead_bucket",
+            "valid_hour_local",
+            "valid_month",
+            *CONTEXT_FEATURE_COLUMNS,
+        )
+        or c.startswith(("age__", "obs__", "ewagg__", "ens__"))
     ]
     return ForecastMatrix.build(
         sources=chosen,
@@ -648,8 +766,15 @@ def to_supervised_slice(
     feature_columns = [
         c
         for c in usable.columns
-        if c in ("issue_time", "lead_bucket", "valid_hour_local", "valid_month")
-        or c.startswith(("age__", "obs__", "ewagg__"))
+        if c
+        in (
+            "issue_time",
+            "lead_bucket",
+            "valid_hour_local",
+            "valid_month",
+            *CONTEXT_FEATURE_COLUMNS,
+        )
+        or c.startswith(("age__", "obs__", "ewagg__", "ens__"))
     ]
     x = ForecastMatrix.build(
         sources=sources,

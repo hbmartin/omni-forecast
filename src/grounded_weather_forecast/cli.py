@@ -92,12 +92,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backfill = subparsers.add_parser(
         "backfill",
-        help="fetch Open-Meteo Previous Runs into a synthetic supervised matrix",
+        help="fetch archived forecasts into the synthetic supervised matrix",
+    )
+    backfill.add_argument(
+        "--provider",
+        choices=("open_meteo", "dynamical"),
+        default="open_meteo",
+        help="open_meteo: Previous Runs (24h-multiple leads); dynamical:"
+        " dynamical.org full cycles at native steps (sub-24h leads; needs"
+        " the 'backfill' dependency group)",
     )
     backfill.add_argument(
         "--models",
         default="",
-        help="comma-separated Open-Meteo models (default: [backfill.open_meteo].models)",
+        help="comma-separated models (default: the provider's config list)",
+    )
+    backfill.add_argument(
+        "--start",
+        type=date.fromisoformat,
+        default=None,
+        help="first init date, YYYY-MM-DD (default: the provider's config start_date)",
     )
     backfill.add_argument(
         "--end",
@@ -109,7 +123,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--chunk-days",
         type=int,
         default=90,
-        help="days per request (default: 90)",
+        help="days per request (open_meteo only; default: 90)",
+    )
+    subparsers.add_parser(
+        "truth-qc",
+        help="cross-check station truth against lapse-adjusted Synoptic"
+        " neighbors and fit the radiation-shield error model",
+    )
+    ingest = subparsers.add_parser(
+        "ingest-ensembles",
+        help="poll the Open-Meteo Ensemble API and append per-model spread"
+        " statistics to the ensembles parquet store",
+    )
+    ingest.add_argument(
+        "--models",
+        default="",
+        help="comma-separated ensemble models (default: [ensembles].models)",
     )
     predict = subparsers.add_parser(
         "predict", help="emit the current blended forecast as JSON"
@@ -278,8 +307,35 @@ def _cmd_alignment(config: Config) -> int:
     )
     print_summary("alignment study", study)
     print(f"recommended: {artifact['recommended']}")
+    match artifact.get("data_backed"):
+        case dict() as backed:
+            defaulted = sorted(
+                name for name, is_backed in backed.items() if not is_backed
+            )
+            if defaulted:
+                print(
+                    "on the instantaneous DEFAULT (no source reached "
+                    f"{artifact.get('min_rows')} overlapping rows): "
+                    f"{', '.join(defaulted)}"
+                )
+            decided = sorted(name for name, is_backed in backed.items() if is_backed)
+            if decided:
+                print(f"data-backed: {', '.join(decided)}")
     print(f"wrote {_alignment_artifact_path(config)}")
     return 0
+
+
+def _dynamical_long(config: Config, args: argparse.Namespace, end: date):
+    from grounded_weather_forecast.dataset.backfill_dynamical import (  # noqa: PLC0415
+        backfill_dynamical_long,
+    )
+
+    start = args.start or config.backfill.dynamical_start_date
+    if start is None:
+        msg = "set [backfill.dynamical].start_date or pass --start"
+        raise ValueError(msg)
+    models = _split_csv(args.models)
+    return backfill_dynamical_long(config, start, end, models=models or None)
 
 
 def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
@@ -287,23 +343,134 @@ def _cmd_backfill(config: Config, args: argparse.Namespace) -> int:
         BackfillError,
         backfill_long,
     )
+    from grounded_weather_forecast.dataset.backfill_dynamical import (  # noqa: PLC0415
+        DynamicalBackfillError,
+    )
     from grounded_weather_forecast.dataset.matrix import (  # noqa: PLC0415
         write_synthetic_matrix,
     )
 
     end = args.end or (datetime.now(tz=UTC).date() - timedelta(days=1))
-    models = _split_csv(args.models)
     try:
-        long_frame = backfill_long(
-            config, end, models=models or None, chunk_days=args.chunk_days
-        )
-    except (BackfillError, OSError) as exc:
+        match args.provider:
+            case "dynamical":
+                long_frame = _dynamical_long(config, args, end)
+            case _:
+                models = _split_csv(args.models)
+                long_frame = backfill_long(
+                    config, end, models=models or None, chunk_days=args.chunk_days
+                )
+    except (BackfillError, DynamicalBackfillError, OSError, ValueError) as exc:
         print(f"backfill failed: {exc}")
         return 1
     path, rows = write_synthetic_matrix(config, long_frame)
     print(f"backfilled {long_frame.height} forecast points")
     print(f"sources: {', '.join(sorted(long_frame['source'].unique().to_list()))}")
     print(f"synthetic matrix: {rows} rows -> {path}")
+    return 0
+
+
+def _cmd_truth_qc(config: Config) -> int:
+    import json  # noqa: PLC0415
+
+    import numpy as np  # noqa: PLC0415
+
+    from grounded_weather_forecast.dataset.matrix import build_truth  # noqa: PLC0415
+    from grounded_weather_forecast.dataset.neighbors import (  # noqa: PLC0415
+        NeighborError,
+        fetch_neighbor_checks,
+    )
+    from grounded_weather_forecast.dataset.truth_qc import (  # noqa: PLC0415
+        fit_shield_error,
+    )
+    from grounded_weather_forecast.reports.render import (  # noqa: PLC0415
+        write_markdown_report,
+    )
+    from grounded_weather_forecast.solar import toa_irradiance_wm2  # noqa: PLC0415
+
+    minute, hourly_truth, _daily = build_truth(config)
+    try:
+        checks = fetch_neighbor_checks(config, hourly_truth)
+    except (NeighborError, OSError, ValueError) as exc:
+        print(f"truth-qc failed: {exc}")
+        return 1
+    artifact: dict[str, object] = {
+        "n_neighbors": checks.n_neighbors,
+        "drift_alert": checks.drift_alert,
+        "correlation_alert": checks.correlation_alert,
+        "daily_drift": checks.daily_drift.to_dicts(),
+    }
+    shield_note = "insufficient daytime overlap for the shield fit"
+    if not minute.is_empty() and "wind_speed_ms" in minute.columns:
+        scored = minute.drop_nulls(["temp_c", "wind_speed_ms"])
+        if scored.height:
+            epoch = scored["ts"].dt.epoch(time_unit="s").to_numpy().astype(np.float64)
+            toa = toa_irradiance_wm2(
+                epoch, config.station.latitude, config.station.longitude
+            )
+            residual = (
+                scored["temp_c"].to_numpy()
+                - scored["temp_c"].rolling_median(window_size=180).to_numpy()
+            )
+            fit = fit_shield_error(residual, toa, scored["wind_speed_ms"].to_numpy())
+            if fit is not None:
+                artifact["shield_fit"] = {
+                    "slope_c_per_unit": fit.slope_c_per_unit,
+                    "intercept_c": fit.intercept_c,
+                    "slope_se": fit.slope_se,
+                    "n_daytime": fit.n_daytime,
+                    "significant": fit.significant,
+                }
+                shield_note = (
+                    f"slope {fit.slope_c_per_unit:+.2f} degC per unit load "
+                    f"(se {fit.slope_se:.2f}, n={fit.n_daytime}); a growing "
+                    "positive slope is the failing-shield signature"
+                )
+    config.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    (config.artifacts_dir / "truth_qc.json").write_text(
+        json.dumps(artifact, indent=2, default=str), encoding="utf-8"
+    )
+    write_markdown_report(
+        config.reports_dir,
+        "truth_qc",
+        "Station truth cross-checks",
+        [
+            ("Daily station-minus-consensus (degC)", checks.daily_drift),
+            ("Rolling 72h correlation", checks.rolling_correlation.tail(24)),
+        ],
+    )
+    print(f"neighbors: {checks.n_neighbors}")
+    print(
+        f"drift alert: {checks.drift_alert}  correlation alert: {checks.correlation_alert}"
+    )
+    print(f"shield: {shield_note}")
+    print(f"wrote {config.artifacts_dir / 'truth_qc.json'}")
+    return 0
+
+
+def _cmd_ingest_ensembles(config: Config, args: argparse.Namespace) -> int:
+    from dataclasses import replace  # noqa: PLC0415
+
+    from grounded_weather_forecast.dataset.ensembles import (  # noqa: PLC0415
+        EnsembleError,
+        append_ensembles,
+        ensembles_path,
+        ingest_ensembles,
+    )
+
+    models = _split_csv(args.models)
+    if models:
+        config = replace(config, ensembles=replace(config.ensembles, models=models))
+    try:
+        fresh = ingest_ensembles(config)
+    except (EnsembleError, OSError, ValueError) as exc:
+        print(f"ensemble ingest failed: {exc}")
+        return 1
+    path = ensembles_path(config)
+    new_rows, total_rows = append_ensembles(path, fresh)
+    models_seen = ", ".join(sorted(fresh["model"].unique().to_list()))
+    print(f"ingested {fresh.height} statistic rows from {models_seen}")
+    print(f"ensembles store: +{new_rows} new rows, {total_rows} total -> {path}")
     return 0
 
 
@@ -342,6 +509,8 @@ def _cmd_predict(config: Config, args: argparse.Namespace) -> int:
         print(f"cannot predict: {exc}")
         return 1
 
+    if document.status == "degraded" and document.status_reason:
+        print(f"degraded: {document.status_reason}", file=sys.stderr)
     payload = document.to_json()
     if args.out == "-":
         print(payload)
@@ -487,7 +656,15 @@ def _cmd_report(config: Config) -> int:
         sections = [
             ("Per-slice leaderboard", board),
             ("Aggregate (n-weighted MAE)", aggregate_leaderboard(board)),
-            ("Per-slice winners", slice_winners(board)),
+            (
+                "Per-slice winners",
+                slice_winners(
+                    board,
+                    scores=scores,
+                    rule=config.promotion.rule,
+                    alpha=config.promotion.alpha,
+                ),
+            ),
         ]
         # Serving runs on the live provider set, so its realized skill may only
         # be compared with a leaderboard built from the same provenance — a
@@ -520,11 +697,38 @@ def _cmd_report(config: Config) -> int:
                 config.reports_dir, report_name, report_name, sections
             )
         )
-        print_summary(f"winners ({path.stem})", slice_winners(board))
+        print_summary(
+            f"winners ({path.stem})",
+            slice_winners(
+                board,
+                scores=scores,
+                rule=config.promotion.rule,
+                alpha=config.promotion.alpha,
+            ),
+        )
     matrix_file = _live_hourly_matrix_path(config)
     if matrix_file.exists():
         matrix = pl.read_parquet(matrix_file)
         if not matrix.is_empty():
+            from grounded_weather_forecast.reports.drift import (  # noqa: PLC0415
+                drift_report,
+                write_drift_artifact,
+            )
+
+            alarms = drift_report(matrix, HOURLY_VARIABLES)
+            write_drift_artifact(alarms, config.artifacts_dir / "drift.json")
+            if alarms.is_empty():
+                print("drift: no alarms")
+            else:
+                print_summary("drift alarms", alarms)
+            written.append(
+                write_markdown_report(
+                    config.reports_dir,
+                    "drift",
+                    "Provider drift alarms (consensus + residual tiers)",
+                    [("Alarms", alarms)],
+                )
+            )
             correlation = error_correlation(
                 matrix, hourly_variable("temp_c"), TruthSemantics.INSTANTANEOUS
             )
@@ -562,6 +766,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _cmd_alignment(config)
         case "backfill":
             return _cmd_backfill(config, args)
+        case "ingest-ensembles":
+            return _cmd_ingest_ensembles(config, args)
+        case "truth-qc":
+            return _cmd_truth_qc(config)
         case "predict":
             return _cmd_predict(config, args)
         case _:  # pragma: no cover - argparse enforces the choices

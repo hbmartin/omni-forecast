@@ -1,0 +1,66 @@
+# Scheduling: the four crons that feed the system
+
+The archive is the binding constraint on everything this project can learn
+([Limitations §1](limitations.md)) — and three of the four inputs cannot be
+backfilled after the fact. These launchd templates (in
+[`docs/launchd/`](https://github.com/hbmartin/grounded-weather-forecast/tree/main/docs/launchd))
+keep the pipeline fed unattended on macOS. On Linux, translate each to a
+systemd timer or crontab line; the cadence rationale is identical.
+
+## The jobs and how often to run them
+
+| Job | Cadence | Why this cadence |
+|---|---|---|
+| `poll` — the upstream `omni-weather` collector | **hourly** | Every missed hour of provider vintages is unrecoverable. Hourly catches every provider's update cycle while staying inside free-tier quotas (the upstream quota tracker enforces per-provider caps). If quotas pinch, drop to per-run-cycle (6-hourly) for the slow-refresh providers via the upstream config, not by slowing this job. |
+| `ingest-ensembles` | **every 6 h** (`StartInterval` 21600) | Ensemble models run on 00/06/12/18 UTC cycles and Open-Meteo retains only the latest run's members — a missed cycle's spread is gone forever. A fixed 6-hour interval catches every cycle regardless of publication lag; the as-of join tolerates any offset. |
+| `predict` | **every 10 min** (`StartInterval` 600) | Matches the 10-minute snapshot grid, so each serve sees at most one new snapshot. Every run appends to the self-verification history — the data that later powers the live-MAE demotion gate — and the online expert state advances incrementally (O(newly resolved rows)), so frequent serves are cheap. Widen to 15–30 min if the machine is battery-constrained; the cost is coarser verification history, not correctness. |
+| `maintain` — `build-dataset` → `backtest --source live` → `report` → `truth-qc` | **daily, 02:15 local** | The retrain loop: refreshed truth, refreshed evidence, re-promoted winners in the release ledger, and the neighbor/shield sensor checks. Daily is the right floor — truth accrues by the hour but promotion decisions move on days. As the archive and method count grow, backtest runtime grows too; if the nightly run gets slow, pass a curated `--methods` subset nightly and run the full sweep weekly. |
+
+The `backfill` commands are deliberately *not* scheduled: they are one-off
+cold-start tools, and re-running them is idempotent but pointless on a cron.
+
+## Installing
+
+1. Copy a template into `~/Library/LaunchAgents/` and fill the
+   `__PLACEHOLDERS__` (repo path, log directory, coordinates, output path,
+   Synoptic token). Keep the label matching the filename.
+
+   ```bash
+   mkdir -p ~/Library/LaunchAgents ~/.local/state/grounded-weather-forecast
+   cp docs/launchd/com.grounded-weather-forecast.predict.plist ~/Library/LaunchAgents/
+   $EDITOR ~/Library/LaunchAgents/com.grounded-weather-forecast.predict.plist
+   ```
+
+2. Load it (modern launchctl syntax):
+
+   ```bash
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.grounded-weather-forecast.predict.plist
+   launchctl kickstart -k gui/$(id -u)/com.grounded-weather-forecast.predict   # run once now
+   ```
+
+3. Verify and watch:
+
+   ```bash
+   launchctl print gui/$(id -u)/com.grounded-weather-forecast.predict | head
+   tail -f __LOG_DIR__/predict.log
+   ```
+
+   To unload: `launchctl bootout gui/$(id -u)/com.grounded-weather-forecast.predict`.
+
+## Notes
+
+- The templates invoke `grounded-weather-forecast` from the login shell
+  (`sh -lc`), so a `uv tool install grounded-weather-forecast` binary on your
+  PATH (`~/.local/bin`) just works. Pin an absolute path if your PATH differs
+  under launchd.
+- `predict` refusing to serve from stale data and `maintain` finding no folds
+  are **normal** early states, not failures — both say so on stdout, and a
+  degraded forecast names its cause in `status_reason` (cold start vs a
+  fingerprint invalidated by a rebuild).
+- launchd `StartCalendarInterval` fires in **local time**; the 6-hourly
+  ensemble job uses `StartInterval` (elapsed seconds) precisely so daylight
+  saving cannot skip a model cycle.
+- Keep the Synoptic token out of the plist if you prefer: set
+  `synoptic_token = "$SYNOPTIC_TOKEN"` in `config.toml` and provide the
+  variable via `launchctl setenv SYNOPTIC_TOKEN ...` instead of the
+  `EnvironmentVariables` block.

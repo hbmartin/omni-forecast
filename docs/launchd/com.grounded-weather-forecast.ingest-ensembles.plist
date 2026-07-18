@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Ensemble spread statistics: Open-Meteo keeps only the latest run's
+       members, so every model cycle must be caught at least once. -->
+  <key>Label</key>
+  <string>com.grounded-weather-forecast.ingest-ensembles</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>cd __REPO__ &amp;&amp; grounded-weather-forecast ingest-ensembles</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>21600</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/ingest-ensembles.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/ingest-ensembles.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>

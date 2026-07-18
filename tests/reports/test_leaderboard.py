@@ -1,14 +1,19 @@
+from datetime import timedelta
+
+import numpy as np
 import polars as pl
 import pytest
 from conftest import synthetic_hourly_matrix, write_config
 
 from grounded_weather_forecast.backtest.engine import BacktestRequest, run_backtest
+from grounded_weather_forecast.backtest.scores import empty_scores
 from grounded_weather_forecast.contracts import hourly_variable
 from grounded_weather_forecast.reports.leaderboard import (
     aggregate_leaderboard,
     leaderboard,
     slice_winners,
 )
+from grounded_weather_forecast.timeutil import utc
 
 
 @pytest.fixture(scope="module")
@@ -70,11 +75,14 @@ class TestLeaderboard:
         assert keys.unique().height == winners.height
 
     def test_empty_scores(self):
-        from grounded_weather_forecast.backtest.scores import empty_scores
-
         assert leaderboard(empty_scores()).is_empty()
 
-    def test_all_methods_use_one_common_case_mask(self, scores):
+    def test_methods_are_scored_on_their_own_cases(self, scores):
+        """A sparse method loses its own missing cases; the others keep theirs.
+
+        The old behavior shrank every method to the all-methods intersection,
+        which punished complete methods for one sparse method's holes.
+        """
         method = scores["method_id"][0]
         issue = scores.filter(pl.col("method_id") == method)["issue_time"][0]
         sparse = scores.with_columns(
@@ -84,9 +92,18 @@ class TestLeaderboard:
             .alias("y_pred")
         )
         board = leaderboard(sparse)
-        for group in board.partition_by("lead_bucket"):
-            assert group["n"].n_unique() == 1
-            assert group["coverage"].n_unique() == 1
+        full_board = leaderboard(scores)
+        sparse_rows = board.filter(pl.col("method_id") == method)
+        other_rows = board.filter(pl.col("method_id") != method)
+        full_other = full_board.filter(pl.col("method_id") != method)
+        # the sparse method's own n shrank somewhere...
+        assert (
+            sparse_rows["n"].sum()
+            < full_board.filter(pl.col("method_id") == method)["n"].sum()
+        )
+        # ...while every other method kept its full case set
+        assert other_rows["n"].sum() == full_other["n"].sum()
+        assert "n_valid_times" in board.columns
 
     def test_aggregate_rmse_combines_squared_error(self):
         board = pl.DataFrame(
@@ -101,3 +118,50 @@ class TestLeaderboard:
         )
         result = aggregate_leaderboard(board).row(0, named=True)
         assert result["rmse"] == pytest.approx(5.0**0.5)
+
+
+class TestDmCollapsesPseudoReplication:
+    """Dozens of snapshots forecasting the same valid hour must not
+    manufacture DM significance: losses collapse to one per valid_time."""
+
+    def make_scores(self, replicates):
+        rng = np.random.default_rng(0)
+        start = utc(2026, 3, 1)
+        rows = []
+        for i in range(12):
+            valid = start + timedelta(hours=i)
+            loss_reference = 1.0 + abs(float(rng.normal(0.0, 0.3)))
+            loss_challenger = loss_reference + float(rng.normal(0.0, 0.5))
+            for r in range(replicates):
+                lead = 24.0 + 0.25 * r
+                issue = valid - timedelta(hours=lead)
+                for method, loss in (
+                    ("challenger", abs(loss_challenger)),
+                    ("equal_weight", loss_reference),
+                ):
+                    rows.append(
+                        {
+                            "product": "hourly",
+                            "variable": "temp_c",
+                            "lead_bucket": "24-48h",
+                            "method_id": method,
+                            "issue_time": issue,
+                            "valid_time": valid,
+                            "lead_hours": lead,
+                            "y_pred": loss,
+                            "y_true": 0.0,
+                        }
+                    )
+        return pl.DataFrame(rows)
+
+    def test_replication_leaves_p_value_unchanged(self):
+        single = leaderboard(self.make_scores(1))
+        replicated = leaderboard(self.make_scores(30))
+        column = "dm_p_vs_equal_weight"
+        p_single = single.filter(pl.col("method_id") == "challenger")[column][0]
+        p_replicated = replicated.filter(pl.col("method_id") == "challenger")[column][0]
+        assert p_single is not None
+        assert p_replicated == pytest.approx(p_single)
+        # n still reports every scored row; only the DM test collapses
+        n_replicated = replicated.filter(pl.col("method_id") == "challenger")["n"][0]
+        assert n_replicated == 360

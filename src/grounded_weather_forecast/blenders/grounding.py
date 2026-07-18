@@ -18,6 +18,7 @@ carries both variants so the data, not this docstring, decides.
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
@@ -40,20 +41,32 @@ _MIN_FIT_ROWS = 24
 _MIN_VARIANCE = 1e-9
 _MAX_ABS_SLOPE = 5.0
 
+type InterceptEstimator = Literal["mean", "median"]
+
 
 def fit_affine(
-    x: FloatArray, y: FloatArray, slope_shrinkage: float = BIAS_ONLY
+    x: FloatArray,
+    y: FloatArray,
+    slope_shrinkage: float = BIAS_ONLY,
+    intercept: InterceptEstimator = "mean",
 ) -> tuple[float, float]:
     """Fit ``y ~ a + b*x`` with the slope shrunk toward the identity.
 
     ``slope_shrinkage`` interpolates between a pure bias correction (0, the
-    default) and the unconstrained least-squares slope (1). The intercept is
-    always chosen so the correction passes through the training centroid, so
-    the training bias is fully removed whatever the slope.
+    default) and the unconstrained least-squares slope (1). The mean intercept
+    is chosen so the correction passes through the training centroid, fully
+    removing the training bias whatever the slope. The ``"median"`` intercept
+    minimizes MAE — the metric the leaderboard promotes on — and only exists
+    for bias-only grounding, where the residual ``y - x`` is well defined.
     """
     n = x.shape[0]
+    if intercept == "median" and slope_shrinkage != BIAS_ONLY:
+        msg = "median intercept requires bias-only grounding (slope_shrinkage == 0)"
+        raise ValueError(msg)
     if n < _MIN_FIT_ROWS:
         return IDENTITY
+    if intercept == "median":
+        return float(np.median(y - x)), 1.0
     x_mean, y_mean = float(x.mean()), float(y.mean())
     centered = x - x_mean
     sxx = float(centered @ centered)
@@ -72,6 +85,7 @@ class AffineGrounding:
 
     slope_shrinkage: float = BIAS_ONLY
     buckets: tuple[LeadBucket, ...] = HOURLY_BUCKETS
+    intercept: InterceptEstimator = "mean"
     _by_source: dict[str, FittedBuckets[tuple[float, float]]] = field(
         default_factory=dict
     )
@@ -86,7 +100,10 @@ class AffineGrounding:
             def fit_one(rows: np.ndarray, index: int = index) -> tuple[float, float]:
                 available = rows[train.x.availability[rows, index]]
                 return fit_affine(
-                    values[available, index], y[available], self.slope_shrinkage
+                    values[available, index],
+                    y[available],
+                    self.slope_shrinkage,
+                    self.intercept,
                 )
 
             fitter = PerBucketFitter[tuple[float, float]](

@@ -242,3 +242,74 @@ class TestPredictCli:
         captured = capsys.readouterr()
         assert json.loads(captured.out)["issued_at"] == NOW.isoformat()
         assert "appended" in captured.err
+
+
+class TestMinutelySinglePass:
+    """Anchoring is applied exactly once, by whichever stage was promoted."""
+
+    def make_snapshot(self):
+        import numpy as np
+        import polars as pl
+
+        from grounded_weather_forecast.serve.predict import Snapshot
+        from grounded_weather_forecast.timeutil import utc
+
+        issue = utc(2026, 3, 22, 12, 0)
+        hourly = pl.DataFrame(
+            {
+                "valid_time": [issue + timedelta(hours=1), issue + timedelta(hours=2)],
+                "lead_hours": [1.0, 2.0],
+            },
+            schema_overrides={"valid_time": pl.Datetime("us", "UTC")},
+        )
+        return Snapshot(
+            issue_time=issue,
+            hourly=hourly,
+            daily=pl.DataFrame(),
+            minutely=pl.DataFrame(),
+            observation={"temp_c": 10.0},
+            observation_at=issue,
+        ), np.array([20.0, 21.0])
+
+    def blend(self, path, method_id):
+        from grounded_weather_forecast.serve.predict import VariableBlend
+
+        return VariableBlend(
+            point=path,
+            methods=[method_id, method_id],
+            reasons=["", ""],
+            release_ids=[None, None],
+            quantiles=[{}, {}],
+        )
+
+    def test_anchored_selection_is_not_re_anchored(self, la_config):
+        from grounded_weather_forecast.serve.predict import minutely_product
+
+        snapshot, path = self.make_snapshot()
+        points = minutely_product(
+            snapshot,
+            {"temp_c": self.blend(path, "anchored_fitted_grounded")},
+            la_config,
+        )
+        # pure interpolation: minute 1 clamps to the first hourly value, and
+        # the 10-degree observation is deliberately ignored (already anchored)
+        assert points[0].temp_c == pytest.approx(20.0)
+
+    def test_unanchored_selection_converges_to_the_observation(self, la_config):
+        from grounded_weather_forecast.serve.predict import minutely_product
+
+        snapshot, path = self.make_snapshot()
+        points = minutely_product(
+            snapshot,
+            {"temp_c": self.blend(path, "grounded_equal_weight")},
+            la_config,
+        )
+        # base extrapolates to 19.0 at lead 0; residual = 10 - 19 = -9;
+        # minute 1 = interp(20.0) + w*(−9) with w ~ 1 -> about 11
+        assert points[0].temp_c == pytest.approx(11.0, abs=0.1)
+        # minute 60: w = exp(-1/tau) with the 3h config default
+        import math
+
+        expected = 20.0 + math.exp(-1.0 / 3.0) * -9.0
+        assert points[-1].temp_c == pytest.approx(expected, abs=0.1)
+        assert points[-1].temp_c > points[0].temp_c  # decaying toward the path

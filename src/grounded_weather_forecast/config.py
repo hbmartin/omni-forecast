@@ -161,6 +161,33 @@ class QcConfig:
 class BackfillConfig:
     models: tuple[str, ...]
     start_date: date | None
+    dynamical_models: tuple[str, ...] = ()
+    dynamical_start_date: date | None = None
+    dynamical_publication_lag_hours: float = 6.0
+    dynamical_max_lead_hours: float = 48.0
+
+
+# Canonical variables the Ensemble API ingest reduces by default.
+DEFAULT_ENSEMBLE_VARIABLES: tuple[str, ...] = (
+    "temp_c",
+    "dew_point_c",
+    "wind_speed_ms",
+    "wind_gust_ms",
+    "pressure_sea_hpa",
+    "precip_mm",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class EnsemblesConfig:
+    """Open-Meteo Ensemble API ingestion (spread features, not sources)."""
+
+    models: tuple[str, ...]
+    variables: tuple[str, ...]
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.models)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +195,26 @@ class BacktestConfig:
     initial_train_days: int
     step_days: int
     rolling_window_days: int
+
+
+@dataclass(frozen=True, slots=True)
+class TruthQcConfig:
+    """Neighbor-station cross-checks (Synoptic free tier)."""
+
+    synoptic_token: str = ""
+    radius_km: float = 25.0
+    elevation_band_m: float = 300.0
+    lapse_k_per_km: float = 6.5
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionConfig:
+    """How slice winners are promoted to serving releases."""
+
+    rule: str = "mcs"
+    alpha: float = 0.1
+    live_gap_factor: float = 1.5
+    min_live_n: int = 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,8 +233,11 @@ class Config:
     qc: QcConfig
     provider_qc: ProviderQcConfig
     backfill: BackfillConfig
+    ensembles: EnsemblesConfig
     backtest: BacktestConfig
     predict: PredictConfig
+    promotion: PromotionConfig
+    truth_qc: TruthQcConfig
     reports_dir: Path
     artifacts_dir: Path
 
@@ -434,6 +484,26 @@ def _provider_qc(raw: Mapping[str, Any]) -> ProviderQcConfig:
     )
 
 
+def _optional_date(value: Any, context: str) -> date | None:
+    match value:
+        case None:
+            return None
+        case datetime():
+            msg = f"'start_date' in [{context}] must be a date, not datetime"
+            raise ConfigError(msg)
+        case date():
+            return value
+        case str():
+            try:
+                return date.fromisoformat(value)
+            except (ValueError,) as exc:  # noqa: B013 - project exception style
+                msg = f"'start_date' in [{context}] must be YYYY-MM-DD"
+                raise ConfigError(msg) from exc
+        case _:
+            msg = f"'start_date' in [{context}] must be a date"
+            raise ConfigError(msg)
+
+
 def _backfill(raw: Mapping[str, Any]) -> BackfillConfig:
     section = _section(raw, "backfill")
     open_meteo = _section(section, "open_meteo") if "open_meteo" in section else {}
@@ -441,25 +511,57 @@ def _backfill(raw: Mapping[str, Any]) -> BackfillConfig:
     if not isinstance(models, list) or not all(isinstance(m, str) for m in models):
         msg = "'models' in [backfill.open_meteo] must be a list of strings"
         raise ConfigError(msg)
-    raw_start = open_meteo.get("start_date")
-    match raw_start:
-        case None:
-            start = None
-        case datetime():
-            msg = "'start_date' in [backfill.open_meteo] must be a date, not datetime"
-            raise ConfigError(msg)
-        case date():
-            start = raw_start
-        case str():
-            try:
-                start = date.fromisoformat(raw_start)
-            except (ValueError,) as exc:  # noqa: B013 - project exception style
-                msg = "'start_date' in [backfill.open_meteo] must be YYYY-MM-DD"
-                raise ConfigError(msg) from exc
-        case _:
-            msg = "'start_date' in [backfill.open_meteo] must be a date"
-            raise ConfigError(msg)
-    return BackfillConfig(models=tuple(models), start_date=start)
+    dynamical = _section(section, "dynamical") if "dynamical" in section else {}
+    return BackfillConfig(
+        models=tuple(models),
+        start_date=_optional_date(open_meteo.get("start_date"), "backfill.open_meteo"),
+        dynamical_models=_string_tuple(
+            dynamical.get("models", []), "models", "backfill.dynamical"
+        ),
+        dynamical_start_date=_optional_date(
+            dynamical.get("start_date"), "backfill.dynamical"
+        ),
+        dynamical_publication_lag_hours=_positive_number(
+            dynamical.get("publication_lag_hours", 6.0),
+            "publication_lag_hours",
+            "backfill.dynamical",
+        ),
+        dynamical_max_lead_hours=_positive_number(
+            dynamical.get("max_lead_hours", 48.0),
+            "max_lead_hours",
+            "backfill.dynamical",
+        ),
+    )
+
+
+_ENSEMBLE_ALLOWED_VARIABLES: tuple[str, ...] = (
+    *DEFAULT_ENSEMBLE_VARIABLES,
+    "humidity_pct",
+)
+
+
+def _string_tuple(value: Any, key: str, context: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        msg = f"{key!r} in [{context}] must be a list of strings"
+        raise ConfigError(msg)
+    return tuple(value)
+
+
+def _ensembles(raw: Mapping[str, Any]) -> EnsemblesConfig:
+    section = _section(raw, "ensembles") if "ensembles" in raw else {}
+    models = _string_tuple(section.get("models", []), "models", "ensembles")
+    variables = _string_tuple(
+        section.get("variables", list(DEFAULT_ENSEMBLE_VARIABLES)),
+        "variables",
+        "ensembles",
+    )
+    if unknown := sorted(set(variables) - set(_ENSEMBLE_ALLOWED_VARIABLES)):
+        msg = (
+            f"unknown [ensembles].variables {unknown}; "
+            f"allowed: {sorted(_ENSEMBLE_ALLOWED_VARIABLES)}"
+        )
+        raise ConfigError(msg)
+    return EnsemblesConfig(models=models, variables=variables)
 
 
 def _backtest(raw: Mapping[str, Any]) -> BacktestConfig:
@@ -473,6 +575,40 @@ def _backtest(raw: Mapping[str, Any]) -> BacktestConfig:
             section.get("rolling_window_days", 180),
             "rolling_window_days",
             "backtest",
+        ),
+    )
+
+
+def _truth_qc(raw: Mapping[str, Any]) -> TruthQcConfig:
+    section = _section(raw, "truth_qc") if "truth_qc" in raw else {}
+    return TruthQcConfig(
+        synoptic_token=str(section.get("synoptic_token", "")),
+        radius_km=_positive_number(
+            section.get("radius_km", 25.0), "radius_km", "truth_qc"
+        ),
+        elevation_band_m=_positive_number(
+            section.get("elevation_band_m", 300.0), "elevation_band_m", "truth_qc"
+        ),
+        lapse_k_per_km=_positive_number(
+            section.get("lapse_k_per_km", 6.5), "lapse_k_per_km", "truth_qc"
+        ),
+    )
+
+
+def _promotion(raw: Mapping[str, Any]) -> PromotionConfig:
+    section = _section(raw, "promotion") if "promotion" in raw else {}
+    rule = str(section.get("rule", "mcs"))
+    if rule not in ("mcs", "legacy"):
+        msg = f"[promotion].rule must be 'mcs' or 'legacy', got {rule!r}"
+        raise ConfigError(msg)
+    return PromotionConfig(
+        rule=rule,
+        alpha=_fraction(section.get("alpha", 0.1), "alpha", "promotion"),
+        live_gap_factor=_positive_number(
+            section.get("live_gap_factor", 1.5), "live_gap_factor", "promotion"
+        ),
+        min_live_n=_positive_int(
+            section.get("min_live_n", 24), "min_live_n", "promotion"
         ),
     )
 
@@ -511,8 +647,11 @@ def load_config(path: Path) -> Config:
         qc=_qc(raw),
         provider_qc=_provider_qc(raw),
         backfill=_backfill(raw),
+        ensembles=_ensembles(raw),
         backtest=_backtest(raw),
         predict=_predict(raw, dataset.dir),
+        promotion=_promotion(raw),
+        truth_qc=_truth_qc(raw),
         reports_dir=Path(str(_section(raw, "reports").get("dir", "reports"))),
         artifacts_dir=Path(str(_section(raw, "artifacts").get("dir", "artifacts"))),
     )

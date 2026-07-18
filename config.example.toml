@@ -75,6 +75,50 @@ temp = 180
 models = ["ecmwf_ifs025", "gfs_seamless", "icon_seamless"]
 start_date = 2024-01-01
 
+# dynamical.org Zarr backfill (`backfill --provider dynamical`): full forecast
+# cycles at native 3-6h steps, i.e. the sub-24h leads the Previous Runs API
+# cannot supply. Free and keyless; needs `uv sync --group backfill`.
+# fetched_at = init + publication_lag_hours, so short-lead skill is never
+# inflated by pretending a cycle was visible before it was published.
+[backfill.dynamical]
+models = ["gefs", "aifs_ens"]
+start_date = 2025-07-02   # AIFS-ENS archive begins here; GEFS goes back to 2020-10
+publication_lag_hours = 6.0
+max_lead_hours = 48.0
+
+# Open-Meteo Ensemble API ingestion (`ingest-ensembles`). Ensemble spread is
+# stored as ens__* FEATURE columns — honest uncertainty from real members —
+# never as blend sources. Open-Meteo keeps only the latest run's members, so
+# run the ingest cron at least once per model cycle.
+[ensembles]
+models = [
+    "ncep_gefs025",                  # GEFS, 31 members (physics)
+    "ecmwf_aifs025_ensemble",        # ECMWF AIFS-ENS, 51 members (ML)
+    "ncep_aigefs025",                # NOAA AIGEFS, 31 members (ML)
+    "google_weathernext2_ensemble",  # Google WeatherNext 2, 64 members (ML)
+]
+# variables = ["temp_c", "dew_point_c", "wind_speed_ms", "wind_gust_ms", "pressure_sea_hpa", "precip_mm"]
+
+# Promotion gate: "mcs" (Model Confidence Set, the default — a challenger
+# ships only when the reference is statistically excluded from the set of
+# best methods) or "legacy" (single Diebold-Mariano test). live_gap_factor
+# demotes a served method whose realized MAE exceeds its backtest promise.
+# Neighbor-station truth cross-checks (`truth-qc`): Synoptic Data free tier,
+# https://synopticdata.com/ — a "$VAR" token reads the environment variable.
+# Catches slow sensor drift (>1 degC vs lapse-adjusted neighbor consensus)
+# and decorrelation (a failing shield can look plausible for months).
+[truth_qc]
+synoptic_token = "$SYNOPTIC_TOKEN"
+radius_km = 25.0
+elevation_band_m = 300.0
+lapse_k_per_km = 6.5
+
+[promotion]
+rule = "mcs"
+alpha = 0.1
+live_gap_factor = 1.5
+min_live_n = 24
+
 [backtest]
 initial_train_days = 90
 step_days = 7

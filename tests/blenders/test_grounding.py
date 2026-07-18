@@ -137,3 +137,45 @@ class TestGroundedBlenders:
         equal = get_factory("grounded_equal_weight")().fit(train).predict(train.x)
         weighted = get_factory("inverse_mse")().fit(train).predict(train.x)
         assert mae(weighted.point, train.y) < mae(equal.point, train.y)
+
+
+class TestMedianIntercept:
+    def test_median_resists_one_sided_spikes(self):
+        rng = np.random.default_rng(5)
+        x = rng.normal(10, 5, 500)
+        spikes = np.where(rng.random(500) < 0.1, 12.0, 0.0)  # asymmetric noise
+        y = x + 2.0 + spikes
+        median_intercept, slope = fit_affine(x, y, intercept="median")
+        mean_intercept, _ = fit_affine(x, y)
+        assert slope == 1.0
+        assert median_intercept == pytest.approx(2.0, abs=0.05)
+        assert mean_intercept > 3.0  # the mean chased the spikes
+
+    def test_median_requires_bias_only(self):
+        x = np.arange(100.0)
+        with pytest.raises(ValueError, match="median intercept"):
+            fit_affine(x, x, 0.5, "median")
+
+    def test_thin_data_is_identity(self):
+        x = np.ones(5)
+        assert fit_affine(x, x + 3.0, intercept="median") == (0.0, 1.0)
+
+    def test_registered_variant_removes_bias(self):
+        matrix = synthetic_hourly_matrix(
+            days=20, biases={"alpha": 2.0, "beta": 2.0}, noise_sd=0.3
+        )
+        train = to_supervised_slice(matrix, TEMP)
+        blender = get_factory("grounded_median_equal_weight")().fit(train)
+        point = blender.predict(train.x).point
+        assert abs(float(np.nanmean(point - train.y))) < 0.3
+
+
+class TestInverseMae:
+    def test_downweights_noisy_source(self):
+        matrix = synthetic_hourly_matrix(
+            days=40, noise_sd={"alpha": 4.0, "beta": 0.3}, seed=7
+        )
+        train = to_supervised_slice(matrix, TEMP)
+        equal = get_factory("grounded_equal_weight")().fit(train).predict(train.x)
+        weighted = get_factory("inverse_mae")().fit(train).predict(train.x)
+        assert mae(weighted.point, train.y) < mae(equal.point, train.y)

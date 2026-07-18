@@ -29,6 +29,7 @@ from grounded_weather_forecast.contracts import (
     ForecastMatrix,
     SupervisedSlice,
     TargetKind,
+    VariableSpec,
     obs_col,
 )
 from grounded_weather_forecast.leads import buckets_for_product
@@ -38,9 +39,11 @@ from grounded_weather_forecast.leads import buckets_for_product
 class Persistence:
     method_id: str = "persistence"
     _kind: TargetKind = TargetKind.CONTINUOUS
+    _variable: VariableSpec | None = None
 
     def fit(self, train: SupervisedSlice) -> Self:
         self._kind = train.variable.kind
+        self._variable = train.variable
         self._obs_column = obs_col(train.variable.name)
         return self
 
@@ -55,7 +58,7 @@ class Persistence:
             )
         else:
             point = np.full(x.n_rows, np.nan)
-        return BlendResult(point=finalize_point(point, self._kind))
+        return BlendResult(point=finalize_point(point, self._kind, self._variable))
 
 
 def _harmonic_design(
@@ -94,12 +97,14 @@ class HarmonicClimatology:
     method_id: str = "climatology"
     ridge: float = 1.0
     _kind: TargetKind = TargetKind.CONTINUOUS
+    _variable: VariableSpec | None = None
     _coefficients: np.ndarray = field(default_factory=lambda: np.zeros(1))
     _has_hour: bool = False
     _has_month: bool = False
 
     def fit(self, train: SupervisedSlice) -> Self:
         self._kind = train.variable.kind
+        self._variable = train.variable
         hour = _feature_or_none(train.x, "valid_hour_local")
         month = _feature_or_none(train.x, "valid_month")
         self._has_hour = hour is not None
@@ -117,7 +122,7 @@ class HarmonicClimatology:
         month = _feature_or_none(x, "valid_month") if self._has_month else None
         design = _harmonic_design(hour, month, x.n_rows)
         point = design @ self._coefficients
-        return BlendResult(point=finalize_point(point, self._kind))
+        return BlendResult(point=finalize_point(point, self._kind, self._variable))
 
 
 @dataclass
@@ -127,9 +132,11 @@ class BestProvider:
 
     method_id: str = "best_provider"
     _kind: TargetKind = TargetKind.CONTINUOUS
+    _variable: VariableSpec | None = None
 
     def fit(self, train: SupervisedSlice) -> Self:
         self._kind = train.variable.kind
+        self._variable = train.variable
         values, y = train.x.values, train.y
 
         def rank_sources(rows: np.ndarray) -> np.ndarray:
@@ -156,7 +163,7 @@ class BestProvider:
                         break
 
         self._fitted.apply(x.lead_hours, use)
-        return BlendResult(point=finalize_point(point, self._kind))
+        return BlendResult(point=finalize_point(point, self._kind, self._variable))
 
 
 @dataclass
@@ -165,14 +172,16 @@ class EqualWeight:
 
     method_id: str = "equal_weight"
     _kind: TargetKind = TargetKind.CONTINUOUS
+    _variable: VariableSpec | None = None
 
     def fit(self, train: SupervisedSlice) -> Self:
         self._kind = train.variable.kind
+        self._variable = train.variable
         return self
 
     def predict(self, x: ForecastMatrix) -> BlendResult:
         point = masked_average(x.values, x.availability)
-        return BlendResult(point=finalize_point(point, self._kind))
+        return BlendResult(point=finalize_point(point, self._kind, self._variable))
 
 
 def _register_baselines() -> None:
