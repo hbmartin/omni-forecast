@@ -394,6 +394,12 @@ class OnlineExperts:
             "grounding": self._grounding.to_state(),
         }
 
+    def observability_state(self) -> dict[str, object]:
+        """``to_state`` without replay cursors: the dashboard-facing view."""
+        state = self.to_state()
+        state.pop("progress", None)
+        return state
+
     @classmethod
     def from_state(cls, state: dict[str, object], method_id: str) -> "OnlineExperts":
         """Rehydrate persisted weights; grounding re-fits on the next advance."""

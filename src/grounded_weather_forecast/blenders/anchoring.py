@@ -138,6 +138,14 @@ class Anchored:
         point = base_point + weight * correction
         return BlendResult(point=finalize_point(point, self._kind, self._variable))
 
+    def to_state(self) -> dict[str, object]:
+        """Compact observability state: the fitted decay and its base."""
+        return {
+            "tau_hours": self._tau_hours,
+            "base_method_id": getattr(getattr(self, "_base", None), "method_id", None),
+            "tau_grid_hours": list(TAU_GRID_HOURS),
+        }
+
 
 _FIT_BIN_EDGES: tuple[float, ...] = (0.0, 1.0, 2.0, 3.0, 6.0, 12.0, 24.0)
 _MIN_BIN_ROWS = 24
@@ -273,6 +281,18 @@ class AnchoredEmpirical:
             trend = np.nan_to_num(self._trends(x), nan=0.0)
             point = point + self._weights_at(x.lead_hours, self._trend_weights) * trend
         return BlendResult(point=finalize_point(point, self._kind, self._variable))
+
+    def to_state(self) -> dict[str, object]:
+        """Compact observability state: the fitted per-lead anchor weights."""
+        residual = self._residual_weights
+        trend = self._trend_weights
+        return {
+            "residual_weights": residual.tolist() if residual is not None else None,
+            "trend_weights": trend.tolist() if trend is not None else None,
+            "bin_edges": list(_FIT_BIN_EDGES),
+            "use_trend": self.use_trend,
+            "base_method_id": getattr(getattr(self, "_base", None), "method_id", None),
+        }
 
 
 def _anchored_gew() -> Blender:

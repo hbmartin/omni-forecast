@@ -249,3 +249,13 @@ class TestOnlineAdvance:
 
         with pytest.raises(ValueError, match="extends beyond"):
             experts.advance(historical)
+
+
+def test_observability_state_drops_replay_cursors():
+    matrix = synthetic_hourly_matrix(days=20)
+    train = to_supervised_slice(matrix, TEMP)
+    state = get_factory("ewa")().fit(train).observability_state()
+    assert "progress" not in state
+    assert "buckets" in state
+    assert "grounding" in state
+    assert state["sources"] == list(train.x.sources)

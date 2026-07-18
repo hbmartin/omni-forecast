@@ -62,6 +62,7 @@ from grounded_weather_forecast.dataset.providers import read_forecast_archive
 from grounded_weather_forecast.evaluation import dataset_fingerprint
 from grounded_weather_forecast.leads import daily_bucket, hourly_bucket
 from grounded_weather_forecast.serve.history import load_archived_forecast
+from grounded_weather_forecast.serve.observability import snapshot_observability
 from grounded_weather_forecast.serve.schema import (
     SCHEMA_VERSION,
     DailyPoint,
@@ -79,7 +80,7 @@ from grounded_weather_forecast.serve.selection import (
 MINUTELY_HORIZON_MINUTES = 60
 HOURLY_HORIZON_HOURS = 48
 DAILY_HORIZON_DAYS = 10
-_OBS_STALENESS = timedelta(minutes=30)
+OBS_STALENESS = timedelta(minutes=30)
 _MINUTELY_VARIABLES = (
     "temp_c",
     "humidity_pct",
@@ -123,7 +124,7 @@ def _latest_observation(
     if minute.is_empty():
         return {}, None
     recent = minute.filter(
-        (pl.col("ts") <= issue_time) & (pl.col("ts") > issue_time - _OBS_STALENESS)
+        (pl.col("ts") <= issue_time) & (pl.col("ts") > issue_time - OBS_STALENESS)
     ).sort("ts")
     if recent.is_empty():
         return {}, None
@@ -247,6 +248,7 @@ def _fit_methods(
     daily: bool,
     semantics: TruthSemantics,
     config: Config | None = None,
+    issue_time: datetime | None = None,
 ) -> tuple[dict[str, BlendResult], ForecastMatrix] | None:
     """Fit each needed method on history and predict the snapshot's rows."""
     truth_sources = matrix_sources(train)
@@ -265,6 +267,15 @@ def _fit_methods(
             )
         else:
             blender = get_factory(method_id)().fit(slice_)
+        if config is not None and issue_time is not None:
+            snapshot_observability(
+                blender,
+                method_id=method_id,
+                product=product,
+                variable=variable.name,
+                config=config,
+                issue_time=issue_time,
+            )
         results[method_id] = blender.predict(x)
     return results, x
 
@@ -329,6 +340,7 @@ def _blend_variable(
     daily: bool,
     semantics: TruthSemantics,
     force_method: str | None = None,
+    issue_time: datetime | None = None,
 ) -> VariableBlend | None:
     """Per row: the prediction of the method selected for that row's bucket."""
     product = "daily" if daily else "hourly"
@@ -362,6 +374,7 @@ def _blend_variable(
         daily=daily,
         semantics=semantics,
         config=config,
+        issue_time=issue_time,
     )
     if fitted is None:
         if {selection.method_id for selection in chosen} != {"equal_weight"}:
@@ -624,6 +637,7 @@ def hourly_product(
             daily=False,
             semantics=variable_semantics,
             force_method=force_method,
+            issue_time=snapshot.issue_time,
         )
         if result is None:
             continue
@@ -685,6 +699,7 @@ def daily_product(
             daily=True,
             semantics=TruthSemantics.INSTANTANEOUS,
             force_method=force_method,
+            issue_time=snapshot.issue_time,
         )
         if result is None:
             continue

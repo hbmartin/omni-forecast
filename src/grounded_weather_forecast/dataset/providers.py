@@ -36,7 +36,7 @@ DAILY_COLUMN_MAP: Mapping[str, str] = {
 }
 
 _SECONDS_PER_HOUR = 3600.0
-_LOCATION_TOLERANCE = 1e-4
+LOCATION_TOLERANCE = 1e-4
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,9 +101,9 @@ def _fetch_points(
         query,
         (
             forecasts.latitude,
-            _LOCATION_TOLERANCE,
+            LOCATION_TOLERANCE,
             forecasts.longitude,
-            _LOCATION_TOLERANCE,
+            LOCATION_TOLERANCE,
         ),
     ).fetchall()
 
@@ -300,9 +300,9 @@ def _read_run_completions(
         "AND ABS(latitude - ?) <= ? AND ABS(longitude - ?) <= ?",
         (
             forecasts.latitude,
-            _LOCATION_TOLERANCE,
+            LOCATION_TOLERANCE,
             forecasts.longitude,
-            _LOCATION_TOLERANCE,
+            LOCATION_TOLERANCE,
         ),
     ).fetchall()
     raw = pl.DataFrame(rows, schema={"completed_at_raw": pl.String()}, orient="row")

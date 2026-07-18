@@ -112,6 +112,10 @@ grounded-weather-forecast truth-qc                      # --days 30
 # 7. Leaderboards (per-slice skill with Diebold-Mariano, aggregate, winners,
 #    absolute error, consumer %-within-3F), the provider error-correlation
 #    matrix, and self-verification of forecasts this system actually served.
+#    Also writes reports/dashboard.html — a fully offline, self-contained
+#    operator console (seven zones: freshness, data trust, learning
+#    readiness, evaluation, model internals, serving, explainability) with
+#    threshold alerts sourced from the existing config knobs.
 grounded-weather-forecast report
 
 # 8. Emit the current blended forecast (minutely + hourly + daily) as JSON.
@@ -124,7 +128,13 @@ grounded-weather-forecast predict --out forecast.json
 #   --method auto|<id>   --now <iso>   --no-history   --semantics ...
 ```
 
-Every command takes `--config <path>` (default `config.toml`).
+Every command takes `--config <path>` (default `config.toml`), and every
+invocation appends one row to `[dataset].dir/runs.parquet` — an append-only
+ledger (command, timing, exit status, dataset/config fingerprints) that the
+dashboard renders as the pipeline heartbeat. Each `predict` run additionally
+snapshots the fitted models' internals (grounding coefficients, expert
+weights, GBM importances, anchoring decay) into `[artifacts].dir/observability/`
+for the dashboard's glass-box zone; snapshot failures never affect serving.
 
 ## Status
 
@@ -145,6 +155,7 @@ to serve from stale provider data rather than guessing.
   bugs the evaluation harness caught. **Read before trusting any number.**
 - **[Scheduling](https://hbmartin.github.io/grounded-weather-forecast/scheduling/)** — launchd templates and cadence rationale for the
   polling, ensemble-ingest, predict, and nightly-retrain crons
+- [`docs/changes-0.4.0.md`](https://github.com/hbmartin/grounded-weather-forecast/blob/main/docs/changes-0.4.0.md) — 0.4.0 dashboard + instrumentation changes
 - [`docs/changes-0.3.0.md`](https://github.com/hbmartin/grounded-weather-forecast/blob/main/docs/changes-0.3.0.md) — 0.3.0 migration instructions and change
   rationale (scoring semantics changed; re-run backtest before comparing)
 - [`CONTEXT.md`](https://github.com/hbmartin/grounded-weather-forecast/blob/main/CONTEXT.md) — project glossary (issue time, valid time, lead,
