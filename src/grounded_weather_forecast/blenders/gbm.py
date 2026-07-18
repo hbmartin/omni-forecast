@@ -19,11 +19,15 @@ import numpy as np
 from grounded_weather_forecast.blenders.protocol import finalize_point
 from grounded_weather_forecast.blenders.registry import register
 from grounded_weather_forecast.contracts import (
+    CONTEXT_FEATURE_COLUMNS,
+    DAILY_VARIABLES,
+    HOURLY_VARIABLES,
     BlendResult,
     FloatArray,
     ForecastMatrix,
     SupervisedSlice,
     TargetKind,
+    VariableSpec,
 )
 
 _PARAMS: dict[str, Any] = {
@@ -46,8 +50,8 @@ def _numeric_feature_columns(x: ForecastMatrix) -> list[str]:
     return sorted(
         c
         for c in x.features.columns
-        if c in ("valid_hour_local", "valid_month")
-        or c.startswith(("age__", "obs__", "ewagg__"))
+        if c in ("valid_hour_local", "valid_month", *CONTEXT_FEATURE_COLUMNS)
+        or c.startswith(("age__", "obs__", "ewagg__", "ens__"))
     )
 
 
@@ -76,15 +80,24 @@ def build_features(x: ForecastMatrix) -> tuple[FloatArray, list[str]]:
     return np.column_stack(columns), names
 
 
+def _variable_spec(name: str | None) -> VariableSpec | None:
+    for spec in (*HOURLY_VARIABLES, *DAILY_VARIABLES):
+        if spec.name == name:
+            return spec
+    return None
+
+
 @dataclass
 class GbmStacker:
     method_id: str = "gbm"
     _kind: TargetKind = TargetKind.CONTINUOUS
+    _variable: VariableSpec | None = None
     _feature_names: list[str] = field(default_factory=list)
 
     def fit(self, train: SupervisedSlice) -> Self:
         lightgbm = import_module("lightgbm")
         self._kind = train.variable.kind
+        self._variable = train.variable
         features, self._feature_names = build_features(train.x)
         dataset = lightgbm.Dataset(
             features, label=train.y, feature_name=self._feature_names
@@ -102,13 +115,14 @@ class GbmStacker:
                     aligned[:, target_position] = features[:, index[name]]
             features = aligned
         point = np.asarray(self._booster.predict(features), dtype=np.float64)
-        return BlendResult(point=finalize_point(point, self._kind))
+        return BlendResult(point=finalize_point(point, self._kind, self._variable))
 
     def to_state(self) -> dict[str, Any]:
         return {
             "model": self._booster.model_to_string(),
             "feature_names": self._feature_names,
             "kind": self._kind.value,
+            "variable": self._variable.name if self._variable else None,
         }
 
     @classmethod
@@ -116,6 +130,7 @@ class GbmStacker:
         lightgbm = import_module("lightgbm")
         stacker = cls()
         stacker._kind = TargetKind(state["kind"])
+        stacker._variable = _variable_spec(state.get("variable"))
         stacker._feature_names = list(state["feature_names"])
         stacker._booster = lightgbm.Booster(model_str=state["model"])
         return stacker

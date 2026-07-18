@@ -78,3 +78,69 @@ class TestAnchoring:
         )
         base = get_factory("grounded_equal_weight")().fit(train)
         np.testing.assert_allclose(anchored.predict(x).point, base.predict(x).point)
+
+
+class TestAnchoredEmpirical:
+    """LAMP-style fitted per-lead anchor weights."""
+
+    def persistence_matrix(self, sigma=10.0, days=40, seed=21):
+        """Every snapshot carries one shared offset: errors persist across
+        leads, so the fitted residual weight should approach 1."""
+        matrix = synthetic_hourly_matrix(days=days, noise_sd=0.0, seed=seed)
+        issues = matrix.select("issue_time").unique().sort("issue_time")
+        rng = np.random.default_rng(seed)
+        offsets = issues.with_columns(
+            pl.Series("offset", rng.normal(0.0, sigma, issues.height))
+        )
+        return (
+            matrix.join(offsets, on="issue_time")
+            .with_columns(
+                (pl.col("fx__alpha__temp_c") + pl.col("offset")).alias(
+                    "fx__alpha__temp_c"
+                ),
+                (pl.col("fx__beta__temp_c") + pl.col("offset")).alias(
+                    "fx__beta__temp_c"
+                ),
+            )
+            .drop("offset")
+        )
+
+    def test_persistent_errors_earn_high_weights(self):
+        train = to_supervised_slice(self.persistence_matrix(), TEMP)
+        anchored = get_factory("anchored_fitted_grounded")().fit(train)
+        weights = anchored._residual_weights
+        assert weights is not None
+        assert float(weights[0]) > 0.8  # 0-1h bin
+        assert float(weights[-1]) > 0.5  # even 12-24h persists here
+        base = anchored._base.predict(train.x).point
+        point = anchored.predict(train.x).point
+        short = train.x.lead_hours <= 12.0
+        base_mae = mae(base[short], train.y[short])
+        anchored_mae = mae(point[short], train.y[short])
+        assert anchored_mae < 0.4 * base_mae
+
+    def test_independent_noise_earns_no_weight(self):
+        matrix = synthetic_hourly_matrix(days=40, noise_sd=1.0, seed=22)
+        train = to_supervised_slice(matrix, TEMP)
+        anchored = get_factory("anchored_fitted_grounded")().fit(train)
+        weights = anchored._residual_weights
+        assert weights is not None
+        assert float(weights.max()) < 0.3
+        base = anchored._base.predict(train.x).point
+        point = anchored.predict(train.x).point
+        assert mae(point, train.y) <= 1.03 * mae(base, train.y)
+
+    def test_weights_never_rise_with_lead(self):
+        train = to_supervised_slice(self.persistence_matrix(sigma=3.0), TEMP)
+        anchored = get_factory("anchored_fitted_grounded")().fit(train)
+        weights = anchored._residual_weights
+        assert weights is not None
+        assert (np.diff(weights) <= 1e-12).all()
+
+    def test_trend_variant_registered_and_sane(self):
+        train = to_supervised_slice(self.persistence_matrix(), TEMP)
+        fitted = get_factory("anchored_fitted_grounded")().fit(train)
+        trend = get_factory("anchored_trend_grounded")().fit(train)
+        fitted_mae = mae(fitted.predict(train.x).point, train.y)
+        trend_mae = mae(trend.predict(train.x).point, train.y)
+        assert trend_mae <= 1.1 * fitted_mae

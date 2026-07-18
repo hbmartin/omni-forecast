@@ -3,7 +3,12 @@ the backtest engine constructs a fresh blender per fold (a leakage defense)."""
 
 from collections.abc import Callable
 
-from grounded_weather_forecast.contracts import Blender, Product, VariableSpec
+from grounded_weather_forecast.contracts import (
+    Blender,
+    Product,
+    TargetKind,
+    VariableSpec,
+)
 
 type BlenderFactory = Callable[[], Blender]
 
@@ -41,6 +46,13 @@ def supports_product(
     hourly_only = method_id == "persistence" or method_id.startswith("anchored_")
     if product is Product.DAILY and hourly_only:
         return False
-    return not (
-        variable is not None and variable.name in {"precip_mm", "pop"} and hourly_only
-    )
+    if variable is None:
+        return True
+    if variable.name in {"precip_mm", "pop"} and hourly_only:
+        return False
+    # Gaussian/isotonic distribution heads make no sense for probabilities or
+    # zero-inflated precipitation; a dedicated occurrence/amount split owns
+    # those (improvement plan section 4 P2).
+    distributional = method_id in {"emos", "idr"}
+    skewed = variable.name in {"precip_mm", "precip_sum_mm"}
+    return not (distributional and (variable.kind is TargetKind.PROBABILITY or skewed))

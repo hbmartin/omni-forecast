@@ -104,6 +104,21 @@ def recommended_semantics(study: pl.DataFrame) -> dict[str, str]:
     return recommendations
 
 
+def data_backed_variables(study: pl.DataFrame) -> dict[str, bool]:
+    """Per variable: whether any source reached ``_MIN_ROWS`` overlapping rows.
+
+    A ``False`` means the recommendation is the silent instantaneous default,
+    not a data-backed preference — a thin archive makes every dual-semantics
+    variable look "decided" unless this is surfaced.
+    """
+    if study.is_empty():
+        return {}
+    return {
+        str(key[0]): not group.drop_nulls("preferred").is_empty()
+        for key, group in study.partition_by("variable", as_dict=True).items()
+    }
+
+
 def write_alignment(study: pl.DataFrame, path: Path) -> dict[str, object]:
     """Persist the study + recommendations; returns the artifact dict."""
     sanitized = study.with_columns(
@@ -118,6 +133,8 @@ def write_alignment(study: pl.DataFrame, path: Path) -> dict[str, object]:
     )
     artifact: dict[str, object] = {
         "recommended": recommended_semantics(study),
+        "data_backed": data_backed_variables(study),
+        "min_rows": _MIN_ROWS,
         "study": sanitized.to_dicts(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)

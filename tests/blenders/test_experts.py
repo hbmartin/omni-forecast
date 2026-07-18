@@ -96,3 +96,81 @@ class TestOnlineExperts:
         assert isinstance(blender, OnlineExperts)
         encoded = json.dumps(blender.to_state())
         assert "buckets" in encoded
+
+
+class TestOnlineAdvance:
+    """The training matrix is the pending-loss queue; advance() consumes it."""
+
+    def test_incremental_equals_batch_replay_with_shared_grounding(self):
+        """With one fixed grounding, split replay lands on the batch weights
+        exactly — the matrix-as-queue design has no other state."""
+        matrix = synthetic_hourly_matrix(days=30, noise_sd=0.4, seed=61)
+        full = to_supervised_slice(matrix, TEMP)
+        midpoint = (
+            matrix["issue_time"].min()
+            + (matrix["issue_time"].max() - matrix["issue_time"].min()) / 2
+        )
+        first_half = to_supervised_slice(
+            matrix.filter(pl.col("issue_time") <= midpoint), TEMP
+        )
+        grounding = AffineGrounding().fit(full)
+        batch = OnlineExperts(method_id="boa", scheme="boa")
+        batch._grounding = grounding
+        batch._replay(full)
+        incremental = OnlineExperts(method_id="boa", scheme="boa")
+        incremental._grounding = grounding
+        incremental._replay(first_half)
+        incremental._replay(full, after=incremental._watermark)
+        for label, state in batch._states.items():
+            np.testing.assert_allclose(
+                incremental._states[label].weights, state.weights, atol=1e-12
+            )
+
+    def test_public_advance_tracks_batch_closely(self):
+        """The public path re-fits the grounding per serve, so weights may
+        wiggle slightly — but must stay within a tight band of batch replay."""
+        matrix = synthetic_hourly_matrix(days=30, noise_sd=0.4, seed=61)
+        full = to_supervised_slice(matrix, TEMP)
+        midpoint = (
+            matrix["issue_time"].min()
+            + (matrix["issue_time"].max() - matrix["issue_time"].min()) / 2
+        )
+        first_half = to_supervised_slice(
+            matrix.filter(pl.col("issue_time") <= midpoint), TEMP
+        )
+        batch = OnlineExperts(method_id="boa", scheme="boa").fit(full)
+        incremental = OnlineExperts(method_id="boa", scheme="boa").fit(first_half)
+        restored = OnlineExperts.from_state(incremental.to_state(), "boa")
+        restored.advance(full)
+        for label, state in batch._states.items():
+            weights = restored._states[label].weights
+            # per-serve grounding refits perturb BOA's regret-variance path;
+            # weights stay in a band and the expert ordering never flips
+            np.testing.assert_allclose(weights, state.weights, atol=0.1)
+            np.testing.assert_array_equal(
+                np.argsort(weights), np.argsort(state.weights)
+            )
+
+    def test_advance_is_idempotent(self):
+        matrix = synthetic_hourly_matrix(days=20, noise_sd=0.4, seed=62)
+        train = to_supervised_slice(matrix, TEMP)
+        experts = OnlineExperts(method_id="ewa", scheme="ewa").fit(train)
+        weights_before = {
+            label: state.weights.copy() for label, state in experts._states.items()
+        }
+        experts.advance(train)  # same data: nothing past the watermark
+        for label, weights in weights_before.items():
+            np.testing.assert_array_equal(experts._states[label].weights, weights)
+
+    def test_state_round_trip(self):
+        matrix = synthetic_hourly_matrix(days=15, noise_sd=0.4, seed=63)
+        train = to_supervised_slice(matrix, TEMP)
+        experts = OnlineExperts(method_id="boa", scheme="boa").fit(train)
+        state = experts.to_state()
+        restored = OnlineExperts.from_state(state, "boa")
+        assert restored._watermark == experts._watermark
+        assert restored._sources == experts._sources
+        for label, bucket_state in experts._states.items():
+            np.testing.assert_array_equal(
+                restored._states[label].weights, bucket_state.weights
+            )

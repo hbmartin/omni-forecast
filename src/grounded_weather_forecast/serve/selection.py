@@ -154,7 +154,12 @@ def select_methods(
             latest = combined["evaluation_created_at"].max()
             combined = combined.filter(pl.col("evaluation_created_at") == latest)
         selected_scores.append(combined)
-        winners = slice_winners(leaderboard(combined))
+        winners = slice_winners(
+            leaderboard(combined),
+            scores=combined,
+            rule=config.promotion.rule,
+            alpha=config.promotion.alpha,
+        )
         evaluation_id = (
             str(combined["evaluation_id"][0])
             if "evaluation_id" in combined.columns
@@ -170,6 +175,12 @@ def select_methods(
                 evaluation_id=evaluation_id,
                 dataset_fingerprint=dataset_fingerprint(config),
             )
+    selections = apply_live_gate(
+        selections,
+        _live_verification(config),
+        factor=config.promotion.live_gap_factor,
+        min_n=config.promotion.min_live_n,
+    )
     for (product, variable), method_id in pinned.items():
         for key in [k for k in selections if k[:2] == (product, variable)]:
             selections[key] = replace(
@@ -226,6 +237,59 @@ def select_methods(
             for key, selected in selections.items()
         }
     return selections
+
+
+def _live_verification(config: Config) -> pl.DataFrame:
+    """Realized served-forecast skill, empty until history and truth exist."""
+    if not config.predict.history_path.exists():
+        return pl.DataFrame()
+    from grounded_weather_forecast.dataset.matrix import build_truth  # noqa: PLC0415
+    from grounded_weather_forecast.reports.verification import (  # noqa: PLC0415
+        verify_history,
+    )
+
+    minute, hourly, daily = build_truth(config)
+    return verify_history(config.predict.history_path, hourly, minute, daily)
+
+
+def apply_live_gate(
+    selections: dict[tuple[str, str, str], Selection],
+    live: pl.DataFrame,
+    *,
+    factor: float,
+    min_n: int,
+) -> dict[tuple[str, str, str], Selection]:
+    """Close the self-verification loop: demote methods that underdeliver live.
+
+    A selected method whose realized served MAE is materially worse than its
+    backtest promise (``live_mae > factor * backtest_mae`` at ``n >= min_n``)
+    falls back to the reference method — the one failure a backtest can never
+    catch by itself. The verdict travels in the selection reason, so the
+    release ledger records every demotion.
+    """
+    if live.is_empty():
+        return selections
+    by_key = {
+        (str(row["product"]), str(row["variable"]), str(row["method_id"])): row
+        for row in live.iter_rows(named=True)
+    }
+    gated = dict(selections)
+    for key, selected in selections.items():
+        product, variable, _bucket = key
+        row = by_key.get((product, variable, selected.method_id))
+        if row is None or selected.mae is None:
+            continue
+        live_mae = float(row["live_mae"])
+        if int(row["n"]) >= min_n and live_mae > factor * selected.mae:
+            gated[key] = replace(
+                selected,
+                method_id=FALLBACK_METHOD,
+                reason=(
+                    f"demoted {selected.method_id}: live MAE {live_mae:.3f} vs "
+                    f"backtest {selected.mae:.3f} (factor {factor})"
+                ),
+            )
+    return gated
 
 
 def method_for(

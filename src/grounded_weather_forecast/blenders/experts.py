@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Self
 
 import numpy as np
+import polars as pl
 
 from grounded_weather_forecast.blenders.grounding import AffineGrounding
 from grounded_weather_forecast.blenders.protocol import finalize_point
@@ -38,6 +39,7 @@ from grounded_weather_forecast.contracts import (
     Product,
     SupervisedSlice,
     TargetKind,
+    VariableSpec,
 )
 from grounded_weather_forecast.leads import bucket_for_product
 
@@ -86,8 +88,11 @@ class OnlineExperts:
     scheme: Literal["ewa", "boa"]
     share: float = _SHARE
     _kind: TargetKind = TargetKind.CONTINUOUS
+    _variable: VariableSpec | None = None
     _grounding: AffineGrounding = field(default_factory=AffineGrounding)
     _states: dict[str, _BucketState] = field(default_factory=dict)
+    _watermark: str | None = None
+    _sources: tuple[str, ...] = ()
 
     def _update_factor(
         self,
@@ -146,7 +151,31 @@ class OnlineExperts:
 
     def fit(self, train: SupervisedSlice) -> Self:
         self._kind = train.variable.kind
+        self._variable = train.variable
         self._grounding = AffineGrounding().fit(train)
+        self._replay(train)
+        return self
+
+    def advance(self, train: SupervisedSlice) -> Self:
+        """True online continuation: consume only rows past the watermark.
+
+        The training matrix IS the pending-loss queue — rows whose truth
+        resolved since the last serve are exactly the rows with a newer
+        ``issue_time``. Weights carry over; the batch replay of ``fit`` is
+        never re-run, so a serve costs O(new rows), not O(history). The
+        grounding is re-fit each call (a cheap batch OLS): expert weights are
+        the drift-adaptive state worth persisting, grounded corrections are
+        not — matching how the online-aggregation literature grounds
+        per round.
+        """
+        self._kind = train.variable.kind
+        self._variable = train.variable
+        self._grounding = AffineGrounding().fit(train)
+        self._replay(train, after=self._watermark)
+        return self
+
+    def _replay(self, train: SupervisedSlice, after: str | None = None) -> None:
+        self._sources = train.x.sources
         corrected = self._grounding.transform(train.x)
         n_experts = len(train.x.sources)
         buckets = [
@@ -154,7 +183,17 @@ class OnlineExperts:
             for lead in train.x.lead_hours
         ]
         horizons = Counter(buckets)
-        for row in range(train.x.n_rows):
+        issue = (
+            train.x.features["issue_time"].cast(pl.Datetime("us", "UTC")).to_numpy()
+            if "issue_time" in train.x.features.columns
+            else None
+        )
+        threshold = np.datetime64(after) if after and issue is not None else None
+        order = np.argsort(issue, kind="stable") if issue is not None else None
+        rows = order if order is not None else np.arange(train.x.n_rows)
+        for row in rows:
+            if threshold is not None and issue is not None and issue[row] <= threshold:
+                continue
             bucket = buckets[row]
             if bucket not in self._states:
                 fresh = _uniform(n_experts)
@@ -163,7 +202,10 @@ class OnlineExperts:
             awake = train.x.availability[row]
             losses = np.where(awake, (corrected[row] - train.y[row]) ** 2, 0.0)
             self._step(self._states[bucket], losses, awake)
-        return self
+        if issue is not None and issue.shape[0]:
+            newest = str(np.datetime_as_string(issue.max(), unit="us"))
+            if self._watermark is None or newest > self._watermark:
+                self._watermark = newest
 
     def _state_for(self, product: Product, lead: float, n_experts: int) -> _BucketState:
         """Fitted state for a lead, or a uniform default for unseen buckets."""
@@ -183,7 +225,7 @@ class OnlineExperts:
             if weights is None:
                 continue
             point[row] = float((weights * corrected[row][awake]).sum())
-        return BlendResult(point=finalize_point(point, self._kind))
+        return BlendResult(point=finalize_point(point, self._kind, self._variable))
 
     def bucket_weights(self, bucket_label: str) -> FloatArray | None:
         """Final normalized weights for one bucket (inspection and tests)."""
@@ -198,6 +240,8 @@ class OnlineExperts:
         return {
             "scheme": self.scheme,
             "share": self.share,
+            "watermark": self._watermark,
+            "sources": list(self._sources),
             "buckets": {
                 label: {
                     "weights": state.weights.tolist(),
@@ -209,6 +253,44 @@ class OnlineExperts:
             },
             "grounding": self._grounding.to_state(),
         }
+
+    @classmethod
+    def from_state(cls, state: dict[str, object], method_id: str) -> "OnlineExperts":
+        """Rehydrate persisted weights; grounding re-fits on the next advance."""
+        match state.get("scheme"):
+            case "ewa":
+                scheme: Literal["ewa", "boa"] = "ewa"
+            case "boa":
+                scheme = "boa"
+            case other:
+                msg = f"unknown expert scheme in state: {other!r}"
+                raise ValueError(msg)
+        experts = cls(method_id=method_id, scheme=scheme)
+        share = state.get("share")
+        if isinstance(share, (int, float)):
+            experts.share = float(share)
+        watermark = state.get("watermark")
+        if isinstance(watermark, str):
+            experts._watermark = watermark
+        sources = state.get("sources")
+        if isinstance(sources, list):
+            experts._sources = tuple(str(s) for s in sources)
+        buckets = state.get("buckets")
+        if isinstance(buckets, dict):
+            for label, raw in buckets.items():
+                if not isinstance(raw, dict):
+                    continue
+                horizon = raw.get("horizon", 1)
+                steps = raw.get("steps", 0)
+                experts._states[str(label)] = _BucketState(
+                    weights=np.asarray(raw.get("weights", []), dtype=np.float64),
+                    regret_variance=np.asarray(
+                        raw.get("regret_variance", []), dtype=np.float64
+                    ),
+                    horizon=int(horizon) if isinstance(horizon, (int, float)) else 1,
+                    steps=int(steps) if isinstance(steps, (int, float)) else 0,
+                )
+        return experts
 
 
 def _ewa() -> OnlineExperts:

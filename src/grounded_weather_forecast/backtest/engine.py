@@ -7,6 +7,7 @@ snapshots issued in the following step. Output is the scores frame.
 """
 
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -178,7 +179,15 @@ def run_backtest(
                         ),
                         pl.Series(
                             "quantiles_json",
-                            [json.dumps(row.tolist()) for row in prediction.quantiles]
+                            [
+                                json.dumps(
+                                    [
+                                        value if math.isfinite(value) else None
+                                        for value in row.tolist()
+                                    ]
+                                )
+                                for row in prediction.quantiles
+                            ]
                             if prediction.quantiles is not None
                             else [None] * test_slice.x.n_rows,
                             dtype=pl.String,

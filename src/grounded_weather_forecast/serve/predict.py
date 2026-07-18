@@ -35,6 +35,10 @@ from grounded_weather_forecast.contracts import (
     VariableSpec,
     hourly_variable,
 )
+from grounded_weather_forecast.dataset.ensembles import (
+    ensembles_path,
+    load_ensembles,
+)
 from grounded_weather_forecast.dataset.matrix import (
     build_daily_matrix,
     build_hourly_matrix,
@@ -128,7 +132,12 @@ def build_snapshot(config: Config, issue_time: datetime) -> Snapshot:
         schema={"issue_time": pl.Datetime("us", "UTC")},
     )
     hourly = build_hourly_matrix(
-        archive.hourly, snapshots, hourly_truth, causal_minute, config
+        archive.hourly,
+        snapshots,
+        hourly_truth,
+        causal_minute,
+        config,
+        ensembles=load_ensembles(ensembles_path(config)),
     ).filter(pl.col("lead_hours") <= HOURLY_HORIZON_HOURS)
     daily = build_daily_matrix(
         archive.daily, snapshots, hourly, daily_truth, config
@@ -162,6 +171,63 @@ def build_snapshot(config: Config, issue_time: datetime) -> Snapshot:
     )
 
 
+_STATEFUL_METHODS = frozenset({"ewa", "boa"})
+
+
+def _stateful_blender(
+    method_id: str,
+    slice_,
+    config: Config,
+    product: str,
+    variable_name: str,
+):
+    """Warm-started online experts: load state, advance past the watermark, save.
+
+    Activates the artifact store on the serve path: a serve costs O(rows
+    resolved since the last serve) instead of a full batch replay, and the
+    drift-adaptive weights genuinely persist between serves. Fingerprint or
+    source-set mismatch falls back to a full refit — yesterday's behavior.
+    """
+    from grounded_weather_forecast.artifacts import (  # noqa: PLC0415
+        ArtifactError,
+        ArtifactStore,
+    )
+    from grounded_weather_forecast.blenders.experts import (  # noqa: PLC0415
+        OnlineExperts,
+    )
+
+    store = ArtifactStore(config.artifacts_dir / "state")
+    fingerprint = dataset_fingerprint(config)
+    blender = None
+    try:
+        state = store.load_state(
+            fingerprint=fingerprint,
+            method_id=method_id,
+            product=product,
+            variable=variable_name,
+        )
+        if state.get("sources") == list(slice_.x.sources):
+            blender = OnlineExperts.from_state(state, method_id).advance(slice_)
+    except (ArtifactError, ValueError, OSError):
+        blender = None
+    if blender is None:
+        fitted = get_factory(method_id)().fit(slice_)
+        if not isinstance(fitted, OnlineExperts):  # pragma: no cover - registry gap
+            return fitted
+        blender = fitted
+    try:
+        store.save(
+            fingerprint=fingerprint,
+            method_id=method_id,
+            product=product,
+            variable=variable_name,
+            state=blender.to_state(),
+        )
+    except OSError:
+        pass  # persistence is an optimization, never a serve failure
+    return blender
+
+
 def _fit_methods(
     train: pl.DataFrame,
     predict_frame: pl.DataFrame,
@@ -170,6 +236,7 @@ def _fit_methods(
     *,
     daily: bool,
     semantics: TruthSemantics,
+    config: Config | None = None,
 ) -> tuple[dict[str, BlendResult], ForecastMatrix] | None:
     """Fit each needed method on history and predict the snapshot's rows."""
     truth_sources = matrix_sources(train)
@@ -180,8 +247,14 @@ def _fit_methods(
         return None
     x = to_forecast_matrix(predict_frame, variable, daily=daily, sources=truth_sources)
     results: dict[str, BlendResult] = {}
+    product = "daily" if daily else "hourly"
     for method_id in sorted(method_ids):
-        blender = get_factory(method_id)().fit(slice_)
+        if config is not None and method_id in _STATEFUL_METHODS:
+            blender = _stateful_blender(
+                method_id, slice_, config, product, variable.name
+            )
+        else:
+            blender = get_factory(method_id)().fit(slice_)
         results[method_id] = blender.predict(x)
     return results, x
 
@@ -234,6 +307,7 @@ def _blend_variable(
         {c.method_id for c in chosen},
         daily=daily,
         semantics=semantics,
+        config=config,
     )
     if fitted is None:
         if {selection.method_id for selection in chosen} != {"equal_weight"}:
@@ -311,8 +385,8 @@ def hourly_product(
     config: Config,
     semantics: TruthSemantics | Mapping[str, TruthSemantics],
     force_method: str | None = None,
-) -> tuple[list[HourlyPoint], dict[str, np.ndarray]]:
-    """Blended hourly path, plus the raw per-variable arrays for anchoring."""
+) -> tuple[list[HourlyPoint], dict[str, VariableBlend]]:
+    """Blended hourly path, plus the per-variable blends for the minutely product."""
     frame = snapshot.hourly.sort("valid_time")
     blended: dict[str, VariableBlend] = {}
     for variable in HOURLY_VARIABLES:
@@ -361,7 +435,7 @@ def hourly_product(
         for index, row in enumerate(frame.iter_rows(named=True))
     ]
     _cohere_hourly(points)
-    return points, {name: result.point for name, result in blended.items()}
+    return points, blended
 
 
 def daily_product(
@@ -449,12 +523,28 @@ def _minutely_precip(snapshot: Snapshot) -> dict[datetime, tuple[float, float]]:
     }
 
 
+def _now_forecast(leads: np.ndarray, path: np.ndarray) -> float:
+    """The path extrapolated to lead 0 (``np.interp`` would clamp to the
+    first hourly value, ~0.5-1 h out, and misstate the anchor residual)."""
+    if leads.shape[0] >= 2:
+        slope = (path[1] - path[0]) / (leads[1] - leads[0])
+        return float(path[0] - slope * leads[0])
+    return float(path[0])
+
+
 def minutely_product(
     snapshot: Snapshot,
-    hourly_blend: dict[str, np.ndarray],
+    hourly_blend: dict[str, VariableBlend],
     config: Config,
 ) -> list[MinutelyPoint]:
-    """The anchored nowcast: hourly path interpolated to minutes + decayed residual."""
+    """The anchored nowcast: hourly path interpolated to minutes, anchored ONCE.
+
+    When the selected hourly method is already an ``anchored_*`` blender, its
+    fitted correction is baked into the path and the minutely product only
+    interpolates — anchoring is applied exactly once, by whichever stage the
+    leaderboard promoted. The config decay is the cold-start fallback for
+    un-anchored paths.
+    """
     frame = snapshot.hourly.sort("valid_time")
     if frame.is_empty():
         return []
@@ -466,15 +556,18 @@ def minutely_product(
         lead = minute / 60.0
         values: dict[str, float | None] = {}
         for name in _MINUTELY_VARIABLES:
-            path = hourly_blend.get(name)
-            if path is None or not np.isfinite(path).any():
+            blend = hourly_blend.get(name)
+            if blend is None or not np.isfinite(blend.point).any():
                 continue
-            usable = np.isfinite(path)
-            interpolated = float(np.interp(lead, leads[usable], path[usable]))
+            usable = np.isfinite(blend.point)
+            usable_leads, path = leads[usable], blend.point[usable]
+            interpolated = float(np.interp(lead, usable_leads, path))
             observed = snapshot.observation.get(name)
-            if observed is not None:
-                now_blend = float(np.interp(0.0, leads[usable], path[usable]))
-                residual = observed - now_blend
+            already_anchored = bool(blend.methods) and blend.methods[0].startswith(
+                "anchored"
+            )
+            if observed is not None and not already_anchored:
+                residual = observed - _now_forecast(usable_leads, path)
                 interpolated += (
                     _anchor_weight(minute, config.predict.minutely_tau_hours) * residual
                 )
