@@ -12,6 +12,7 @@ nav = [
   { "Theory and Concepts" = "theory.md" },
   { "Architecture" = "architecture.md" },
   { "Limitations" = "limitations.md" },
+  { "Scheduling" = "scheduling.md" },
   { "Improvement Plan" = "improvement-plan.md" },
   { "Releasing" = "releasing.md" },
   { "Decisions" = [

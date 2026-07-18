@@ -64,6 +64,7 @@ from grounded_weather_forecast.serve.selection import (
     Selection,
     SelectionMap,
     method_for,
+    no_evidence_reason,
 )
 
 MINUTELY_HORIZON_MINUTES = 60
@@ -670,6 +671,9 @@ def predict(
         }
     )
     degraded = not release_ids and force_method is None
+    status_reason = (
+        no_evidence_reason(config, config.dataset.dir / "scores") if degraded else None
+    )
     return Forecast(
         schema_version=SCHEMA_VERSION,
         issued_at=issue_time.isoformat(),
@@ -685,5 +689,6 @@ def predict(
         daily=daily,
         timezone=config.station.timezone,
         status="degraded" if degraded else "ready",
+        status_reason=status_reason,
         release_ids=release_ids,
     )

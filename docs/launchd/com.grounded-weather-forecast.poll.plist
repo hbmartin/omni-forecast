@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The forecast collector: every missed hour is training data that can
+       never be recovered. Runs the upstream omni-weather CLI. -->
+  <key>Label</key>
+  <string>com.grounded-weather-forecast.poll</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>cd __COLLECTOR_REPO__ &amp;&amp; uvx --from "omni-weather-forecast-apis[cli]" omni-weather --config ./config.toml --lat __LAT__ --lon __LON__ --sqlite __FORECASTS_SQLITE__</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Minute</key>
+    <integer>5</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/poll.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/poll.log</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

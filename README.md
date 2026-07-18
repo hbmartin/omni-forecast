@@ -140,6 +140,8 @@ to serve from stale provider data rather than guessing.
   leakage defences
 - **[Limitations](https://hbmartin.github.io/grounded-weather-forecast/limitations/)** — what this cannot do, and the three real
   bugs the evaluation harness caught. **Read before trusting any number.**
+- **[Scheduling](https://hbmartin.github.io/grounded-weather-forecast/scheduling/)** — launchd templates and cadence rationale for the
+  polling, ensemble-ingest, predict, and nightly-retrain crons
 - [`docs/changes-0.3.0.md`](https://github.com/hbmartin/grounded-weather-forecast/blob/main/docs/changes-0.3.0.md) — 0.3.0 migration instructions and change
   rationale (scoring semantics changed; re-run backtest before comparing)
 - [`CONTEXT.md`](https://github.com/hbmartin/grounded-weather-forecast/blob/main/CONTEXT.md) — project glossary (issue time, valid time, lead,

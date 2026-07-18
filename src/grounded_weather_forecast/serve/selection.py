@@ -292,6 +292,53 @@ def apply_live_gate(
     return gated
 
 
+def no_evidence_reason(config: Config, scores_dir: Path) -> str:
+    """Why serving is degraded: cold start vs invalidated evidence.
+
+    A rebuild that adds matrix columns changes the dataset fingerprint, which
+    correctly invalidates promoted evidence — but that failure reads exactly
+    like a cold start unless it is named. The distinction decides the fix:
+    keep polling, or just re-run the backtest.
+    """
+    paths = sorted(scores_dir.glob("scores_*.parquet"))
+    if not paths:
+        return (
+            "cold start: no backtest scores exist yet; run "
+            "`backtest --source live` then `report` once the archive has folds"
+        )
+    live_datasets: set[str] = set()
+    live_configs: set[str] = set()
+    for path in paths:
+        scores = load_scores(path)
+        if scores.is_empty() or set(scores["source_kind"].unique()) != {"live"}:
+            continue
+        if "dataset_fingerprint" in scores.columns:
+            live_datasets |= {
+                str(value) for value in scores["dataset_fingerprint"].unique().to_list()
+            }
+        if "config_fingerprint" in scores.columns:
+            live_configs |= {
+                str(value) for value in scores["config_fingerprint"].unique().to_list()
+            }
+    if not live_datasets:
+        return (
+            "no live backtest evidence yet (synthetic evidence is never "
+            "promoted); keep polling and run `backtest --source live`"
+        )
+    if dataset_fingerprint(config) not in live_datasets:
+        return (
+            "dataset fingerprint changed since the last backtest (a rebuild "
+            "invalidates promoted evidence); re-run `backtest --source live` "
+            "then `report`"
+        )
+    if config_fingerprint(config) not in live_configs:
+        return (
+            "config changed since the last backtest; re-run "
+            "`backtest --source live` then `report`"
+        )
+    return "live evidence exists but no slice met the promotion gates; keep polling"
+
+
 def method_for(
     selections: SelectionMap,
     product: str,

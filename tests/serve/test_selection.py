@@ -148,3 +148,111 @@ class TestScoresProvenance:
             pl.DataFrame,
         )
         assert utc(2026, 1, 1)  # sanity: fixture epoch unchanged
+
+
+class TestNoEvidenceReason:
+    """Degradation must name its cause: cold start vs invalidated evidence."""
+
+    def _live_scores_row(self, dataset_fp, config_fp):
+        import json as _json
+
+        from grounded_weather_forecast.backtest.scores import SCORES_SCHEMA
+        from grounded_weather_forecast.timeutil import utc
+
+        issue = utc(2026, 3, 22, 12)
+        return pl.DataFrame(
+            {
+                "issue_time": [issue],
+                "valid_time": [issue],
+                "lead_hours": [24.0],
+                "lead_bucket": ["24-48h"],
+                "method_id": ["equal_weight"],
+                "variable": ["temp_c"],
+                "product": ["hourly"],
+                "source_kind": ["live"],
+                "evaluation_id": ["eval1"],
+                "evaluation_created_at": [issue],
+                "dataset_fingerprint": [dataset_fp],
+                "source_set_json": [_json.dumps(["nws"])],
+                "semantics": ["inst"],
+                "code_version": ["test"],
+                "config_fingerprint": [config_fp],
+                "window": ["expanding"],
+                "fold_origin": [issue],
+                "y_pred": [1.0],
+                "y_true": [1.0],
+                "quantile_levels_json": ["[]"],
+                "quantiles_json": [None],
+            }
+        ).cast(SCORES_SCHEMA)
+
+    def test_cold_start(self, tmp_path):
+        from grounded_weather_forecast.serve.selection import no_evidence_reason
+
+        config = write_config(tmp_path)
+        scores_dir = tmp_path / "scores"
+        scores_dir.mkdir()
+        assert "cold start" in no_evidence_reason(config, scores_dir)
+
+    def test_fingerprint_changed_after_rebuild(self, tmp_path):
+        from grounded_weather_forecast.serve.selection import no_evidence_reason
+
+        config = write_config(tmp_path)
+        scores_dir = tmp_path / "scores"
+        scores_dir.mkdir()
+        stale = self._live_scores_row("oldfingerprint00", "oldconfig0000000")
+        stale.write_parquet(scores_dir / "scores_hourly_live_expanding.parquet")
+        reason = no_evidence_reason(config, scores_dir)
+        assert "fingerprint changed" in reason
+        assert "re-run" in reason
+
+    def test_config_changed(self, tmp_path):
+        from grounded_weather_forecast.evaluation import dataset_fingerprint
+        from grounded_weather_forecast.serve.selection import no_evidence_reason
+
+        config = write_config(tmp_path)
+        scores_dir = tmp_path / "scores"
+        scores_dir.mkdir()
+        stale = self._live_scores_row(dataset_fingerprint(config), "oldconfig0000000")
+        stale.write_parquet(scores_dir / "scores_hourly_live_expanding.parquet")
+        assert "config changed" in no_evidence_reason(config, scores_dir)
+
+    def test_synthetic_only_evidence(self, tmp_path):
+        from grounded_weather_forecast.serve.selection import no_evidence_reason
+
+        config = write_config(tmp_path)
+        scores_dir = tmp_path / "scores"
+        scores_dir.mkdir()
+        synthetic = self._live_scores_row("any", "any").with_columns(
+            pl.lit("synthetic").alias("source_kind")
+        )
+        synthetic.write_parquet(
+            scores_dir / "scores_hourly_synthetic_expanding.parquet"
+        )
+        assert "no live backtest evidence" in no_evidence_reason(config, scores_dir)
+
+
+class TestForecastStatusReason:
+    def test_round_trips_and_tolerates_absence(self):
+        from grounded_weather_forecast.serve.schema import Forecast
+
+        forecast = Forecast(
+            schema_version=2,
+            issued_at="2026-03-22T12:00:00+00:00",
+            latitude=34.0,
+            longitude=-117.0,
+            dataset_fingerprint="fp",
+            sources=[],
+            observation_at=None,
+            minutely=[],
+            hourly=[],
+            daily=[],
+            status="degraded",
+            status_reason="cold start: no backtest scores exist yet",
+        )
+        loaded = Forecast.from_json(forecast.to_json())
+        assert loaded.status_reason == forecast.status_reason
+        legacy = forecast.to_json().replace(
+            '"status_reason": "cold start: no backtest scores exist yet",', ""
+        )
+        assert Forecast.from_json(legacy).status_reason is None

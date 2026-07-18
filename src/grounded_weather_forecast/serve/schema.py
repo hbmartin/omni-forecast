@@ -56,6 +56,7 @@ class Forecast:
     daily: list[DailyPoint]
     timezone: str = "UTC"
     status: str = "ready"
+    status_reason: str | None = None
     release_ids: list[str] = field(default_factory=list)
 
     def to_json(self, indent: int | None = 2) -> str:
@@ -78,6 +79,7 @@ class Forecast:
             daily=[DailyPoint(**point) for point in raw.get("daily", [])],
             timezone=str(raw.get("timezone", "UTC")),
             status=str(raw.get("status", "ready")),
+            status_reason=raw.get("status_reason"),
             release_ids=[str(value) for value in raw.get("release_ids", [])],
         )
 

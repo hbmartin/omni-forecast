@@ -509,6 +509,8 @@ def _cmd_predict(config: Config, args: argparse.Namespace) -> int:
         print(f"cannot predict: {exc}")
         return 1
 
+    if document.status == "degraded" and document.status_reason:
+        print(f"degraded: {document.status_reason}", file=sys.stderr)
     payload = document.to_json()
     if args.out == "-":
         print(payload)
