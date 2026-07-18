@@ -135,7 +135,11 @@ def leaderboard(
             rows.append(row)
     if not rows:
         return pl.DataFrame()
-    return pl.DataFrame(rows).sort("product", "variable", "lead_bucket", "mae")
+    # Nullable metric columns (pct_within, brier, skill/DM p-values) may hold
+    # None for every early row; scan all rows so a late float still unifies.
+    return pl.DataFrame(rows, infer_schema_length=None).sort(
+        "product", "variable", "lead_bucket", "mae"
+    )
 
 
 def aggregate_leaderboard(board: pl.DataFrame) -> pl.DataFrame:
