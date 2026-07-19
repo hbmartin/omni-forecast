@@ -781,6 +781,17 @@ def _lead_zero_path(
     )
 
 
+def _regime_run(anchored: list[bool], index: int) -> tuple[int, int]:
+    """Inclusive bounds of the contiguous same-regime run containing ``index``."""
+    start = index
+    while start > 0 and anchored[start - 1] == anchored[index]:
+        start -= 1
+    stop = index
+    while stop + 1 < len(anchored) and anchored[stop + 1] == anchored[index]:
+        stop += 1
+    return start, stop
+
+
 def _minute_path(
     leads: np.ndarray,
     path: np.ndarray,
@@ -797,20 +808,25 @@ def _minute_path(
         return value, value, ordered_methods[0].startswith("anchored")
     right = int(np.searchsorted(ordered_leads, lead, side="left"))
     left = max(min(right - 1, ordered_leads.shape[0] - 2), 0)
-    right = left + 1
     # The regime of the row that owns lead zero governs the whole minutely
-    # range. Switching regime mid-range would both step the path and flip the
-    # anchoring decision partway through, so the nowcast would ignore the live
-    # observation for the minutes on the anchored side.
-    anchored = ordered_methods[left].startswith("anchored")
+    # range, and the path may only be drawn from rows sharing it. An
+    # ``anchored_*`` row's point already carries its fitted correction, so
+    # interpolating across the boundary would fold that correction into a
+    # segment reported as un-anchored — anchoring it a second time below, and
+    # letting the nowcast leave the bracketing hourly values entirely.
+    regimes = [method.startswith("anchored") for method in ordered_methods]
+    start, stop = _regime_run(regimes, left)
+    # A single-row run holds flat: relaxing the live observation toward that
+    # row is the honest nowcast, and the handoff to the next regime happens
+    # beyond the minutely horizon rather than as a step inside it.
     segment_leads, segment_path = _lead_zero_path(
-        ordered_leads[[left, right]],
-        ordered_path[[left, right]],
+        ordered_leads[start : stop + 1],
+        ordered_path[start : stop + 1],
     )
     return (
         float(np.interp(lead, segment_leads, segment_path)),
         float(segment_path[0]),
-        anchored,
+        regimes[left],
     )
 
 

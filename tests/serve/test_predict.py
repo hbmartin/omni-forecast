@@ -492,6 +492,65 @@ class TestMinutelySinglePass:
         # Lead zero is un-anchored, so the live observation is honoured.
         assert values[0] == pytest.approx(21.0, abs=0.5)
 
+    @pytest.mark.parametrize("observation", [21.0, 22.4])
+    def test_mixed_anchor_regimes_stay_inside_the_hourly_bracket(
+        self, la_config, observation
+    ):
+        """Regression: interpolating across a regime boundary anchored twice.
+
+        The far hourly row is ``anchored_*``, so its point already carries a
+        fitted correction. Drawing the minutely path through it while
+        reporting the segment un-anchored added the live-observation residual
+        on top, pushing the nowcast outside the bracketing hourly values --
+        which a monotone interpolation can never legitimately do.
+        """
+        import numpy as np
+        import polars as pl
+
+        from grounded_weather_forecast.serve.predict import (
+            Snapshot,
+            VariableBlend,
+            minutely_product,
+        )
+        from grounded_weather_forecast.timeutil import utc
+
+        low, high = 20.0, 23.0
+        issue = utc(2026, 3, 22, 12, 37)
+        hourly = pl.DataFrame(
+            {
+                "valid_time": [utc(2026, 3, 22, 13), utc(2026, 3, 22, 14)],
+                "lead_hours": [23.0 / 60.0, 83.0 / 60.0],
+            },
+            schema_overrides={"valid_time": pl.Datetime("us", "UTC")},
+        )
+        snapshot = Snapshot(
+            issue_time=issue,
+            hourly=hourly,
+            daily=pl.DataFrame(),
+            minutely=pl.DataFrame(),
+            observation={"temp_c": observation},
+            observation_at=issue,
+        )
+        blend = VariableBlend(
+            point=np.array([low, high]),
+            methods=["grounded_equal_weight", "anchored_fitted_grounded"],
+            reasons=["", ""],
+            release_ids=[None, None],
+            quantiles=[{}, {}],
+        )
+
+        values = [
+            point.temp_c
+            for point in minutely_product(snapshot, {"temp_c": blend}, la_config)
+            if point.temp_c is not None
+        ]
+
+        assert values, "the nowcast must emit temperatures"
+        assert max(values) <= high + 1e-9, (
+            f"emitted {max(values):.3f} above the hourly bracket max {high}"
+        )
+        assert min(values) >= min(low, observation) - 1e-9
+
 
 class TestPhysicalCoherence:
     def test_hourly_points_and_differing_quantile_grids_are_coherent(self):
