@@ -8,6 +8,8 @@ for it, so ``predict`` can refuse fingerprint mismatches explicitly.
 """
 
 import json
+import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +45,7 @@ class ArtifactStore:
         variable: str,
         state: dict[str, Any],
         meta: dict[str, Any] | None = None,
+        reclaim_unreferenced: bool = False,
     ) -> Path:
         slot = self._slot(fingerprint, method_id, product, variable)
         if overlap := _RESERVED_MANIFEST_KEYS.intersection(meta or {}):
@@ -64,8 +67,32 @@ class ArtifactStore:
             slot.mkdir(parents=True, exist_ok=True)
             atomic_write_text(json.dumps(state), slot / "state.json")
             atomic_write_text(json.dumps(manifest, indent=2), slot / "manifest.json")
-            self._update_latest(fingerprint, method_id, product, variable)
+            latest = self._update_latest(fingerprint, method_id, product, variable)
+            if reclaim_unreferenced:
+                self._reclaim_unreferenced(latest)
         return slot
+
+    def _reclaim_unreferenced(self, latest: Mapping[str, Any]) -> None:
+        """Delete fingerprint trees no ``latest.json`` pointer names.
+
+        Takes the pointer map the caller just wrote, and the caller holds the
+        lock on it — both matter: a slot is written before the pointer that
+        names it, so an unsynchronized pass would race a concurrent ``save``
+        and delete the tree it is still writing into. Every state read reaches
+        a slot through a pointer (``load_latest_state``,
+        ``load_observability_states``), so a tree no pointer names is
+        unreachable rather than merely old.
+        """
+        referenced = {
+            entry["fingerprint"]
+            for entry in latest.values()
+            if isinstance(entry, Mapping) and isinstance(entry.get("fingerprint"), str)
+        }
+        if not referenced or not self.root.is_dir():
+            return
+        for child in self.root.iterdir():
+            if child.is_dir() and child.name not in referenced:
+                shutil.rmtree(child, ignore_errors=True)
 
     @staticmethod
     def _read_slot_json(path: Path, kind: str) -> dict[str, Any]:
@@ -152,8 +179,11 @@ class ArtifactStore:
 
     def _update_latest(
         self, fingerprint: str, method_id: str, product: str, variable: str
-    ) -> None:
-        """Merge one pointer entry. Callers hold the lock on ``latest.json``."""
+    ) -> dict[str, dict[str, str]]:
+        """Merge one pointer entry, returning the map written.
+
+        Callers hold the lock on ``latest.json``.
+        """
         latest = self.read_latest()
         latest[f"{product}.{variable}.{method_id}"] = {
             "fingerprint": fingerprint,
@@ -164,3 +194,4 @@ class ArtifactStore:
         atomic_write_text(
             json.dumps(latest, indent=2, sort_keys=True), self._latest_path()
         )
+        return latest

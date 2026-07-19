@@ -99,14 +99,26 @@ def append_run(record: RunRecord, path: Path) -> None:
             combined = pl.concat([load_runs(path), fresh]) if path.exists() else fresh
             # The whole file is rewritten under the lock anyway, so pruning is
             # free here — and without it the ledger grows without bound at the
-            # documented 10-minute `predict` cadence.
-            atomic_write_parquet(prune_runs(combined, now=record.ended_at), path)
+            # documented 10-minute `predict` cadence. The horizon comes from
+            # the wall clock, never from `record`: one row carrying a skewed
+            # future timestamp would otherwise set a horizon in the future and
+            # delete every genuinely recent row along with it.
+            atomic_write_parquet(
+                prune_runs(combined, now=datetime.now(tz=UTC)),
+                path,
+            )
     except (OSError, ValueError, Timeout, pl.exceptions.PolarsError):
         return
 
 
 def load_runs(path: Path) -> pl.DataFrame:
-    """Read the ledger; absent files and older schemas load as null-filled."""
+    """Read the ledger; absent files and older schemas load as null-filled.
+
+    A file that exists but cannot be parsed also reads as empty, which means
+    the next ``append_run`` rewrites it with only the fresh row. That is the
+    intended trade for telemetry — a corrupt ledger must not fail a command —
+    but it does discard whatever the file held.
+    """
     if not path.exists():
         return pl.DataFrame(schema=RUNS_SCHEMA)
     try:

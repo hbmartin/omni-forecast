@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import pairwise
 from typing import Literal
 
 import polars as pl
@@ -20,7 +21,6 @@ from grounded_weather_forecast.config import Config
 from grounded_weather_forecast.contracts import (
     age_col,
     finite_number,
-    provider_age_hours,
     provider_age_is_fresh,
 )
 from grounded_weather_forecast.evaluation import config_fingerprint
@@ -35,6 +35,7 @@ type Severity = Literal["red", "amber", "info"]
 _SEVERITY_ORDER: Mapping[str, int] = {"red": 0, "amber": 1, "info": 2}
 _MIN_BIAS_SAMPLES = 8  # mirrors leaderboard._MIN_DM_SAMPLES
 _SWAP_WINDOW_DAYS = 3.0  # mirrors drift._FAST_WINDOW_DAYS
+_SWAP_MIN_HOLD_DAYS = 0.5  # a crossing shorter than this is a tie, not a swap
 _TRUTH_WINDOW_DAYS = 7.0  # the "trailing week" the message promises
 
 
@@ -146,7 +147,7 @@ def _provider_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
         )
     newest = matrix.filter(pl.col("issue_time") == pl.col("issue_time").max())
     row = newest.row(0, named=True)
-    ages = {source: provider_age_hours(row.get(age_col(source))) for source in expected}
+    ages = {source: finite_number(row.get(age_col(source))) for source in expected}
     missing = [source for source, age in ages.items() if age is None]
     aged = [
         source
@@ -259,7 +260,9 @@ def _truth_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
             evaluated = True
             for column in hourly_columns:
                 if (mean := finite_number(recent_hourly[column].mean())) is None:
-                    unusable.append(column)
+                    # Stripped to match the `thin` detail below: an operator
+                    # reading both lines should see one name per channel.
+                    unusable.append(column.removesuffix("_cov"))
                 elif mean < hour_floor:
                     thin[column] = mean
 
@@ -487,32 +490,75 @@ def _argmax_source(state: Mapping[str, object]) -> dict[str, str]:
     return leaders
 
 
-def _latest_leader_transitions(
-    window: pl.DataFrame,
-) -> tuple[bool, dict[str, tuple[str, str]]]:
-    previous: dict[str, str] | None = None
-    comparable = False
-    transitions: dict[str, tuple[str, str]] = {}
+def _leader_sequences(window: pl.DataFrame) -> dict[str, list[tuple[datetime, str]]]:
+    """Per-label ``(issue_time, leading source)`` samples, oldest first."""
+    sequences: dict[str, list[tuple[datetime, str]]] = {}
     for row in window.iter_rows(named=True):
         try:
-            current = _argmax_source(json.loads(row["state_json"]))
+            leaders = _argmax_source(json.loads(row["state_json"]))
         except (TypeError, ValueError):
             continue
-        if previous is not None:
-            shared = previous.keys() & current.keys()
-            comparable = comparable or bool(shared)
-            for label in shared:
-                if previous[label] != current[label]:
-                    transitions[label] = (previous[label], current[label])
-        previous = current
+        for label, leader in leaders.items():
+            sequences.setdefault(label, []).append((row["issue_time"], leader))
+    return sequences
+
+
+def _held_leaders(
+    samples: list[tuple[datetime, str]], min_hold: timedelta
+) -> list[str]:
+    """Leaders that actually held ``min_hold``, in order, brief crossings dropped.
+
+    Each sample stands for the interval until the next one, so the newest run
+    is credited one typical interval rather than zero. Without that a sparse
+    trajectory — where one snapshot represents hours of state — could never
+    confirm its own most recent change, while a dense one would confirm every
+    single-sample crossing.
+    """
+    if len(samples) < 2:
+        return [leader for _moment, leader in samples]
+    starts: list[tuple[datetime, str]] = []
+    for moment, leader in samples:
+        if not starts or starts[-1][1] != leader:
+            starts.append((moment, leader))
+    gaps = sorted((b - a).total_seconds() for (a, _), (b, _) in pairwise(samples))
+    horizon = samples[-1][0] + timedelta(seconds=gaps[len(gaps) // 2])
+    held: list[str] = []
+    for index, (start, leader) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else horizon
+        if end - start >= min_hold and (not held or held[-1] != leader):
+            held.append(leader)
+    return held
+
+
+def _confirmed_transitions(
+    window: pl.DataFrame,
+) -> tuple[bool, dict[str, tuple[str, str, int]]]:
+    """Latest sustained leader flip per label, with how many flips held.
+
+    ``_argmax_source`` crosses whenever two experts' weights are near-tied,
+    and at the documented 10-minute cadence a 3-day window holds several
+    hundred samples — so counting every crossing would alert on arithmetic
+    noise. A leader must hold ``_SWAP_MIN_HOLD_DAYS`` to count as a regime.
+    """
+    min_hold = timedelta(days=_SWAP_MIN_HOLD_DAYS)
+    comparable = False
+    transitions: dict[str, tuple[str, str, int]] = {}
+    for label, samples in _leader_sequences(window).items():
+        if len(samples) < 2:
+            continue
+        comparable = True
+        held = _held_leaders(samples, min_hold)
+        if flips := [(a, b) for a, b in pairwise(held) if a != b]:
+            previous, leader = flips[-1]
+            transitions[label] = (previous, leader, len(flips))
     return comparable, transitions
 
 
 def _backend_swap_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
     threshold = (
-        f"leader change across a {_SWAP_WINDOW_DAYS:.0f}d window "
-        "(reports/drift.py::_FAST_WINDOW_DAYS); expert weights from "
-        "artifacts/observability/history.parquet"
+        f"leader change held {_SWAP_MIN_HOLD_DAYS:.1f}d+ across a "
+        f"{_SWAP_WINDOW_DAYS:.0f}d window (reports/drift.py::_FAST_WINDOW_DAYS); "
+        "expert weights from artifacts/observability/history.parquet"
     )
     history = inputs.observability_history
     if history.is_empty() or "state_json" not in history.columns:
@@ -529,9 +575,10 @@ def _backend_swap_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
         newest = group.row(group.height - 1, named=True)
         edge = newest["issue_time"] - timedelta(days=_SWAP_WINDOW_DAYS)
         window = group.filter(pl.col("issue_time") >= edge)
-        group_comparable, transitions = _latest_leader_transitions(window)
+        group_comparable, transitions = _confirmed_transitions(window)
         comparable = comparable or group_comparable
-        for label, (previous, leader) in transitions.items():
+        for label, (previous, leader, flips) in transitions.items():
+            flapping = f", {flips} times" if flips > 1 else ""
             alerts.append(
                 Alert(
                     severity="amber",
@@ -540,7 +587,8 @@ def _backend_swap_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
                     message=(
                         f"{newest['method_id']} [{newest['product']}."
                         f"{newest['variable']} {label}] leading expert flipped "
-                        f"{previous} -> {leader} within {_SWAP_WINDOW_DAYS:.0f}d — "
+                        f"{previous} -> {leader} within "
+                        f"{_SWAP_WINDOW_DAYS:.0f}d{flapping} — "
                         "possible provider regime change"
                     ),
                     threshold=threshold,

@@ -714,3 +714,73 @@ def test_unreadable_artifacts_are_named_not_shown_as_absent(tmp_path):
 
 def test_no_unreadable_alert_when_everything_loads(tmp_path):
     assert not by_panel(evaluate_alerts(make_inputs(tmp_path)), "unreadable-artifacts")
+
+
+def _dense_trajectory(leaders):
+    """A trajectory at the documented 10-minute `predict` cadence."""
+    count = len(leaders)
+    moments = [
+        NOW - timedelta(minutes=10 * offset) for offset in reversed(range(count))
+    ]
+    return pl.DataFrame(
+        {
+            "captured_at": moments,
+            "issue_time": moments,
+            "method_id": ["boa"] * count,
+            "product": ["hourly"] * count,
+            "variable": ["temp_c"] * count,
+            "dataset_fingerprint": ["f"] * count,
+            "state_json": [_weight_state(leader) for leader in leaders],
+        }
+    )
+
+
+class TestBackendSwapIgnoresNoise:
+    """`_argmax_source` crosses whenever two experts are near-tied.
+
+    A 3-day window holds ~430 samples at the documented cadence, so counting
+    every crossing would raise an amber alert off arithmetic noise. A leader
+    has to hold `_SWAP_MIN_HOLD_DAYS` before the flip is called a swap.
+    """
+
+    def test_a_single_sample_crossing_is_not_a_swap(self, tmp_path):
+        leaders = [True] * 432
+        leaders[216] = False  # one transient crossing, 10 minutes wide
+
+        alerts = by_panel(
+            evaluate_alerts(
+                make_inputs(tmp_path, observability_history=_dense_trajectory(leaders))
+            ),
+            "backend-swap",
+        )
+
+        assert alerts == [], "a 10-minute crossing must not read as a regime change"
+
+    def test_sustained_flapping_is_reported_with_its_count(self, tmp_path):
+        # Three day-long regimes: alpha, beta, alpha. Both flips held.
+        leaders = [True] * 144 + [False] * 144 + [True] * 144
+
+        alerts = by_panel(
+            evaluate_alerts(
+                make_inputs(tmp_path, observability_history=_dense_trajectory(leaders))
+            ),
+            "backend-swap",
+        )
+
+        assert len(alerts) == 1
+        assert "beta -> alpha" in alerts[0].message, "the latest flip is the headline"
+        assert "2 times" in alerts[0].message, "flapping must be distinguishable"
+
+    def test_a_sustained_flip_still_alerts(self, tmp_path):
+        leaders = [True] * 216 + [False] * 216
+
+        alerts = by_panel(
+            evaluate_alerts(
+                make_inputs(tmp_path, observability_history=_dense_trajectory(leaders))
+            ),
+            "backend-swap",
+        )
+
+        assert len(alerts) == 1
+        assert "alpha -> beta" in alerts[0].message
+        assert "times" not in alerts[0].message, "one flip is not flapping"

@@ -1,4 +1,6 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -135,11 +137,6 @@ class TestConcurrentSaves:
         unparseable, which a later reclamation pass would read as "nothing is
         referenced" -- deleting every state tree.
         """
-        import json
-        from concurrent.futures import ThreadPoolExecutor
-
-        from grounded_weather_forecast.artifacts import ArtifactStore
-
         store = ArtifactStore(tmp_path / "state")
         methods = [f"m{index}" for index in range(24)]
 
@@ -167,10 +164,6 @@ class TestConcurrentSaves:
 
     def test_a_corrupt_pointer_is_an_error_not_an_empty_map(self, tmp_path):
         """Reading it as empty would let reclamation delete every state tree."""
-        import pytest
-
-        from grounded_weather_forecast.artifacts import ArtifactError, ArtifactStore
-
         store = ArtifactStore(tmp_path / "state")
         store.save(
             fingerprint="fp",
@@ -183,3 +176,62 @@ class TestConcurrentSaves:
 
         with pytest.raises(ArtifactError, match="corrupt artifact pointer"):
             store.read_latest()
+
+
+class TestReclamationIsSafeUnderConcurrency:
+    """Reclamation runs inside `save`'s lock, so it cannot delete a live tree.
+
+    A slot is written before the pointer that names it. An unsynchronized
+    reclamation pass reads `latest.json` inside that gap, concludes the other
+    run's fingerprint is unreferenced, and deletes the tree it is still
+    writing into — which is the normal case, not an edge case: `predict` runs
+    every 10 minutes and a rebuild changes the fingerprint between two of them.
+    """
+
+    def test_concurrent_saves_do_not_reclaim_each_other(self, tmp_path):
+        store = ArtifactStore(root=tmp_path / "artifacts")
+        both_ready = Barrier(2, timeout=10)
+
+        def save(fingerprint: str, variable: str):
+            both_ready.wait()
+            return store.save(
+                fingerprint=fingerprint,
+                method_id="gbm",
+                product="hourly",
+                variable=variable,
+                state={"variable": variable},
+                reclaim_unreferenced=True,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(save, "aaaa1111", "temp_c"),
+                pool.submit(save, "bbbb2222", "dew_point_c"),
+            ]
+            slots = [future.result(timeout=10) for future in futures]
+
+        assert all(slot.is_dir() for slot in slots), "a live slot was reclaimed"
+        pointers = store.read_latest()
+        assert len(pointers) == 2
+        for pointer in pointers.values():
+            assert store.load_state(
+                fingerprint=pointer["fingerprint"],
+                method_id=pointer["method_id"],
+                product=pointer["product"],
+                variable=pointer["variable"],
+            ) == {"variable": pointer["variable"]}
+
+    def test_reclamation_removes_only_unreferenced_trees(self, tmp_path):
+        store = ArtifactStore(root=tmp_path / "artifacts")
+        for fingerprint in ("old", "new"):
+            store.save(
+                fingerprint=fingerprint,
+                method_id="gbm",
+                product="hourly",
+                variable="temp_c",
+                state={},
+                reclaim_unreferenced=True,
+            )
+
+        trees = sorted(c.name for c in (tmp_path / "artifacts").iterdir() if c.is_dir())
+        assert trees == ["new"]
