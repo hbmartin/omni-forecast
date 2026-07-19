@@ -69,8 +69,11 @@ def _observation_lag(ctx: DashboardContext) -> Panel:
     newest = frame["ts"].max()
     if not isinstance(newest, datetime):
         return empty_panel(
-            "a2", "a2", "Station observation lag", "red", "observation "
-            "timestamps are unreadable"
+            "a2",
+            "a2",
+            "Station observation lag",
+            "red",
+            "observation timestamps are unreadable",
         )
     lag = ctx.now - newest
     cap = timedelta(hours=ctx.config.forecasts.max_forecast_age_hours)
@@ -100,9 +103,9 @@ def _provider_ages(ctx: DashboardContext, sources: tuple[str, ...]) -> Panel:
             "no live matrix snapshot yet — run `build-dataset` after the "
             "first provider fetches land",
         )
-    newest = matrix.filter(
-        pl.col("issue_time") == matrix["issue_time"].max()
-    ).row(0, named=True)
+    newest = matrix.filter(pl.col("issue_time") == matrix["issue_time"].max()).row(
+        0, named=True
+    )
     cap = ctx.config.forecasts.max_forecast_age_hours
     labels: list[str] = []
     ages: list[float | None] = []
@@ -111,23 +114,22 @@ def _provider_ages(ctx: DashboardContext, sources: tuple[str, ...]) -> Panel:
         age = newest.get(age_col(source))
         labels.append(source)
         ages.append(float(age) if isinstance(age, (int, float)) else None)
-        aged_out = not isinstance(age, (int, float)) or age >= cap
+        aged_out = not isinstance(age, (int, float)) or age > cap
         colors.append("muted" if aged_out else f"series-{(index % 8) + 1}")
-    missing = sum(1 for age in ages if age is None)
-    status = "red" if missing == len(ages) else "amber" if missing else "ok"
+    stale = sum(1 for age in ages if age is None or age > cap)
+    status = "red" if stale == len(ages) else "amber" if stale else "ok"
     return Panel(
         panel_id="a3",
         title="Provider vintage ages",
         status=status,
         copy=PANEL_COPY["a3"],
         stats=(
-            Stat("providers fresh", f"{len(ages) - missing}/{len(ages)}", status),
+            Stat("providers fresh", f"{len(ages) - stale}/{len(ages)}", status),
             Stat("freshness cap", f"{fmt(cap)} h"),
             Stat("snapshot", str(newest.get("issue_time", "—"))),
         ),
         intro=(
-            "Grey bars are providers missing from (or aged out of) the newest "
-            "snapshot."
+            "Grey bars are providers missing from (or aged out of) the newest snapshot."
         ),
         chart=bar_chart(
             labels,

@@ -90,7 +90,7 @@ PANEL_COPY: Mapping[str, PanelCopy] = {
         ),
         thresholds=(
             "The line is config [forecasts].max_forecast_age_hours; anything "
-            "at or past it is excluded from serving and greyed here."
+            "past it is excluded from serving and greyed here."
         ),
     ),
     "b1": PanelCopy(
@@ -99,14 +99,15 @@ PANEL_COPY: Mapping[str, PanelCopy] = {
             "missing, out-of-bounds, spike, and flatline counts."
         ),
         why=(
-            "Flagged samples are nulled, never corrected. A flatline run is "
-            "the early warning for a stuck sensor — a failing radiation "
-            "shield can look plausible for months."
+            "Flagged samples are nulled, never corrected. The chart preserves "
+            "lifetime QC counts, while the status badge follows the latest "
+            "causal flatline state."
         ),
         thresholds=(
             "Bounds and step limits come from [qc].bounds / max_step; "
-            "flatline detection from [qc].flatline_minutes. Flag bits "
-            "overlap, so clean+missing+flagged can exceed the sample count."
+            "flatline detection from [qc].flatline_minutes. A flatline alert "
+            "clears when the latest causal state recovers. Flag bits overlap, "
+            "so clean+missing+flagged can exceed the sample count."
         ),
     ),
     "b2": PanelCopy(
@@ -374,6 +375,11 @@ PANEL_COPY: Mapping[str, PanelCopy] = {
             "the provenance the document was designed to carry. The same "
             "document is replayable byte-for-byte via predict --now."
         ),
-        thresholds="Provider inputs show each source's value and fetch age.",
+        thresholds=(
+            "Hourly and daily provider inputs use the newest provider snapshot "
+            "visible at the served issue and match its exact point; each source "
+            "shows a value and fetch age. Minutely rows expose served "
+            "provenance, but no raw input matrix."
+        ),
     ),
 }

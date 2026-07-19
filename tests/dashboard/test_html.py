@@ -59,7 +59,7 @@ def test_table_cell_classes_and_titles():
 def test_page_has_no_external_references():
     page = make_page()
     assert 'src="http' not in page
-    assert "href=\"http" not in page
+    assert 'href="http' not in page
     assert "@import" not in page
     assert "Chart.js v" in page  # vendored library marker
 

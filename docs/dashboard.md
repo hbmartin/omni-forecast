@@ -67,9 +67,11 @@ fingerprints flagged.
 
 **G — Explainability.** Pick any point/variable of the latest served
 document and see the method that produced it, its selection reason, release
-ids, quantiles, the anchor observation, and each provider's input value and
-fetch age. The same document is replayable byte-for-byte with
-`predict --now <issue>`.
+ids, quantiles, and anchor observation. Hourly and daily provider inputs are
+drawn from the newest provider snapshot visible at the served issue and matched
+to the exact served point. Minutely rows are selectable, but the dataset
+contract does not expose their raw provider-input matrix.
+The same document is replayable byte-for-byte with `predict --now <issue>`.
 
 ## Alerts and their thresholds
 
@@ -109,10 +111,12 @@ nothing is actually flowing.
 
 ## New on-disk signals
 
-- `[dataset].dir/runs.parquet` — append-only ledger of every CLI
-  invocation: command, args, start/end, duration, exit code or exception
-  name, dataset/config fingerprints, code version. Telemetry writes never
-  fail a command (5-second lock timeout, errors swallowed).
+- `[dataset].dir/runs.parquet` — append-only ledger of every command whose
+  configuration loads successfully: command, args, start/end, duration, exit
+  code or exception name, dataset/config fingerprints, code version. Parser
+  and configuration-loading failures cannot be recorded because that
+  configuration supplies the ledger destination. Telemetry writes never fail
+  a command (5-second lock timeout, errors swallowed).
 - `[artifacts].dir/observability/` — per-(method, product, variable)
   latest-state snapshots (`ArtifactStore` layout) plus
   `history.parquet`, an ewa/boa-only weight trajectory pruned to

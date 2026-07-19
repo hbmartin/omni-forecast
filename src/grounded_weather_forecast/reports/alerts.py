@@ -18,6 +18,10 @@ import polars as pl
 
 from grounded_weather_forecast.config import Config
 from grounded_weather_forecast.evaluation import config_fingerprint
+from grounded_weather_forecast.leads import (
+    DAILY_BUCKET_LABELS,
+    HOURLY_BUCKET_LABELS,
+)
 from grounded_weather_forecast.reports.leaderboard import CONSUMER_TOLERANCES
 
 type Severity = Literal["red", "amber", "info"]
@@ -266,13 +270,14 @@ def _truth_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
 
 def _sensor_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
     threshold = "dataset/qc.py::QC_FLATLINE; config [qc].flatline_minutes"
-    if inputs.qc.is_empty() or "flatline" not in inputs.qc.columns:
-        return (_not_evaluable("B", "stuck-sensor", "no QC summary", threshold),)
-    flat = inputs.qc.filter(pl.col("flatline") > 0)
+    needed = {"channel", "flatline", "active_flatline"}
+    if inputs.qc.is_empty() or not needed <= set(inputs.qc.columns):
+        return (_not_evaluable("B", "stuck-sensor", "no active QC state", threshold),)
+    flat = inputs.qc.filter(pl.col("active_flatline"))
     if flat.is_empty():
         return ()
     detail = ", ".join(
-        f"{row['channel']} ({row['flatline']} samples)"
+        f"{row['channel']} ({row['flatline']} flagged samples in history)"
         for row in flat.iter_rows(named=True)
     )
     return (
@@ -366,13 +371,20 @@ def _baseline_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
             ),
         )
     alerts: list[Alert] = []
-    keys = board.select("product", "variable", "lead_bucket").unique().to_dicts()
+    keys = board.select("product", "variable").unique().to_dicts()
     for key in keys:
         group = board.filter(
             (pl.col("product") == key["product"])
             & (pl.col("variable") == key["variable"])
-            & (pl.col("lead_bucket") == key["lead_bucket"])
         )
+        available = set(group["lead_bucket"].drop_nulls().to_list())
+        order = (
+            DAILY_BUCKET_LABELS if key["product"] == "daily" else HOURLY_BUCKET_LABELS
+        )
+        shortest = next((label for label in order if label in available), None)
+        if shortest is None:
+            continue
+        group = group.filter(pl.col("lead_bucket") == shortest)
         mae = {
             row["method_id"]: row["mae"]
             for row in group.iter_rows(named=True)
@@ -389,7 +401,7 @@ def _baseline_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
                 panel_id="baseline-implausible",
                 message=(
                     f"climatology MAE {climatology:.2f} beats best_provider "
-                    f"{reference:.2f} for {key['variable']} {key['lead_bucket']} — "
+                    f"{reference:.2f} for {key['variable']} {shortest} — "
                     "check the baseline floor before trusting anything above it"
                 ),
                 threshold=threshold,

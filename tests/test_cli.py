@@ -187,7 +187,7 @@ class TestRunLedger:
         assert row["code_version"] == __version__
         assert row["duration_ms"] >= 0
 
-    def test_config_error_records_nothing(self, tmp_path):
+    def test_config_error_has_no_configured_ledger_destination(self, tmp_path):
         (tmp_path / "config.toml").write_text("[station]\n", encoding="utf-8")
         code = main(["--config", str(tmp_path / "config.toml"), "qc"])
         assert code == 2
@@ -220,3 +220,25 @@ class TestRunLedger:
         row = load_runs(config.dataset.dir / "runs.parquet").row(0, named=True)
         assert row["dataset_fingerprint"] == "feedface00000000"
         assert row["config_fingerprint"] not in ("", "unknown")
+
+    def test_unexpected_telemetry_error_does_not_break_command(
+        self, tmp_path, monkeypatch
+    ):
+        write_config(tmp_path)
+        make_station_db(
+            tmp_path / "station.db",
+            [
+                ("2026-07-13 19:21:03", {"outTemp": 70.0, "outHumi": 50.0}),
+                ("2026-07-13 19:22:03", {"outTemp": 71.0, "outHumi": 51.0}),
+            ],
+        )
+
+        def fail_run_id(_command, _started_at):
+            raise RuntimeError("unexpected telemetry bug")
+
+        monkeypatch.setattr(
+            "grounded_weather_forecast.runs.run_id_for",
+            fail_run_id,
+        )
+
+        assert main(["--config", str(tmp_path / "config.toml"), "qc"]) == 0

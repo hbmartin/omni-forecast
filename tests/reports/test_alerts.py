@@ -123,12 +123,22 @@ def test_truth_thinning(tmp_path):
 
 
 def test_stuck_sensor(tmp_path):
-    qc = pl.DataFrame({"channel": ["temp", "humidity"], "flatline": [5, 0]})
+    qc = pl.DataFrame(
+        {
+            "channel": ["temp", "humidity"],
+            "flatline": [5, 0],
+            "active_flatline": [True, False],
+        }
+    )
     alerts = evaluate_alerts(make_inputs(tmp_path, qc=qc))
     (alert,) = by_panel(alerts, "stuck-sensor")
-    assert "temp (5 samples)" in alert.message
+    assert "temp (5 flagged samples in history)" in alert.message
     assert "humidity" not in alert.message
     assert "flatline_minutes" in alert.threshold
+
+    recovered = qc.with_columns(pl.lit(False).alias("active_flatline"))
+    alerts = evaluate_alerts(make_inputs(tmp_path, qc=recovered))
+    assert not by_panel(alerts, "stuck-sensor")
 
 
 def test_drift_tiers_map_to_severity(tmp_path):
@@ -194,6 +204,22 @@ def test_baseline_implausible_when_climatology_beats_best_provider(tmp_path):
     )
     assert len(alerts) == 1
     assert "structural heuristic" in alerts[0].threshold
+
+
+def test_baseline_implausible_ignores_long_horizon_climatology_win(tmp_path):
+    board = pl.DataFrame(
+        {
+            "product": ["hourly"] * 4,
+            "variable": ["temp_c"] * 4,
+            "lead_bucket": ["0-1h", "0-1h", "48-96h", "48-96h"],
+            "method_id": ["climatology", "best_provider"] * 2,
+            "mae": [2.0, 1.0, 0.5, 1.0],
+        }
+    )
+
+    alerts = evaluate_alerts(make_inputs(tmp_path, board=board))
+
+    assert not by_panel(alerts, "baseline-implausible")
 
 
 def _weight_state(leader_first):

@@ -101,9 +101,7 @@ def _synthetic_coverage(ctx: DashboardContext) -> Panel:
         )
     span = _issue_span_days(matrix)
     min_lead = matrix["lead_hours"].min() if "lead_hours" in matrix.columns else None
-    sources = sorted(
-        {c.split("__")[1] for c in matrix.columns if c.startswith("fx__")}
-    )
+    sources = sorted({c.split("__")[1] for c in matrix.columns if c.startswith("fx__")})
     return Panel(
         panel_id="c2",
         title="Synthetic backfill",

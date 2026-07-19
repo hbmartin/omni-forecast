@@ -325,6 +325,38 @@ def read_run_completions(forecasts: ForecastsConfig) -> pl.DataFrame:
         connection.close()
 
 
+def read_latest_archive_location(
+    forecasts: ForecastsConfig,
+) -> tuple[float, float] | None:
+    """Coordinates recorded by the newest forecast run, without filtering."""
+    try:
+        connection = _open(forecasts)
+        try:
+            if not _table_exists(connection, "forecast_runs"):
+                return None
+            if not {"latitude", "longitude"} <= _table_columns(
+                connection, "forecast_runs"
+            ):
+                return None
+            row = connection.execute(
+                "SELECT latitude, longitude FROM forecast_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            connection.close()
+    except (  # noqa: B013 - project style requires tuple clauses
+        sqlite3.Error,
+    ) as exc:
+        msg = f"cannot read forecast archive location {forecasts.db_path}: {exc}"
+        raise OSError(msg) from exc
+    if (
+        row is None
+        or len(row) != 2
+        or not all(isinstance(value, (int, float)) for value in row)
+    ):
+        return None
+    return float(row[0]), float(row[1])
+
+
 def read_forecast_archive(forecasts: ForecastsConfig) -> ForecastArchive:
     """Read all products inside one SQLite snapshot transaction."""
     connection = _open(forecasts)

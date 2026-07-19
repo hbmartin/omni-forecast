@@ -151,17 +151,14 @@ def render_page(
     zones: Sequence[Zone],
     payload: Mapping[str, object],
 ) -> str:
-    payload_json = json.dumps(json_safe(payload), allow_nan=False).replace(
-        "</", "<\\/"
-    )
+    payload_json = json.dumps(json_safe(payload), allow_nan=False).replace("</", "<\\/")
     nav = "".join(
         f'<a class="pill" href="#zone-{esc(zone.zone_id)}">{esc(zone.zone_id)} · '
         f"{esc(zone.title)}</a>"
         for zone in zones
     )
     prints = " · ".join(
-        f"{esc(name)} <code>{esc(value)}</code>"
-        for name, value in fingerprints.items()
+        f"{esc(name)} <code>{esc(value)}</code>" for name, value in fingerprints.items()
     )
     body = "".join(render_zone(zone) for zone in zones)
     return (

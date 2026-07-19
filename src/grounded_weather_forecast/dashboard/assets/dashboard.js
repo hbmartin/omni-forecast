@@ -74,14 +74,37 @@
   if (!root || !forecast) {
     return;
   }
-  var inputs = payload.latest_inputs || {};
+  var inputs = payload.inputs || {};
   var productSelect = document.getElementById("explain-product");
   var timeSelect = document.getElementById("explain-time");
   var variableSelect = document.getElementById("explain-variable");
   var detail = document.getElementById("explain-detail");
 
   function points(product) {
+    if (product === "minutely") {
+      return forecast.minutely || [];
+    }
     return (product === "daily" ? forecast.daily : forecast.hourly) || [];
+  }
+
+  function pointKey(product, point) {
+    return product === "daily" ? point.date_local : point.valid_time;
+  }
+
+  function pointValues(product, point) {
+    if (product !== "minutely") {
+      return point.values || {};
+    }
+    var values = {};
+    [
+      "temp_c", "humidity_pct", "dew_point_c", "wind_speed_ms",
+      "precip_intensity_mmh", "pop"
+    ].forEach(function (name) {
+      if (point[name] !== null && point[name] !== undefined) {
+        values[name] = point[name];
+      }
+    });
+    return values;
   }
 
   function option(select, value, label) {
@@ -96,7 +119,9 @@
     points(productSelect.value).forEach(function (point, index) {
       var label = productSelect.value === "daily"
         ? point.date_local + " (D+" + point.lead_days + ")"
-        : point.valid_time + " (+" + point.lead_hours + "h)";
+        : productSelect.value === "minutely"
+          ? point.valid_time + " (+" + point.minutes_ahead + "m)"
+          : point.valid_time + " (+" + point.lead_hours + "h)";
       option(timeSelect, String(index), label);
     });
   }
@@ -107,7 +132,7 @@
     if (!point) {
       return;
     }
-    Object.keys(point.values || {}).sort().forEach(function (name) {
+    Object.keys(pointValues(productSelect.value, point)).sort().forEach(function (name) {
       option(variableSelect, name, name);
     });
   }
@@ -135,7 +160,9 @@
           return "q" + level + "=" + quantiles[level];
         }).join("  ")
       : "point-only (no distributional method selected)";
-    var providers = inputs[name] || {};
+    var productInputs = inputs[productSelect.value] || {};
+    var pointInputs = productInputs[pointKey(productSelect.value, point)] || {};
+    var providers = pointInputs[name] || {};
     var providerText = Object.keys(providers).sort().map(function (source) {
       var entry = providers[source];
       return source + "=" + entry.value +
@@ -145,10 +172,13 @@
     }).join("; ") || "no provider inputs recorded for this variable";
     detail.innerHTML =
       "<dl>" +
-      row("value", escapeText((point.values || {})[name])) +
+      row("value", escapeText(pointValues(productSelect.value, point)[name])) +
       row("method", escapeText((point.methods || {})[name])) +
       row("selection reason",
-          escapeText((point.selection_reasons || {})[name])) +
+          escapeText(
+            productSelect.value === "minutely"
+              ? "minutely interpolation / anchoring path"
+              : (point.selection_reasons || {})[name])) +
       row("quantiles", escapeText(quantileText)) +
       row("issued at", escapeText(forecast.issued_at)) +
       row("document status", escapeText(
@@ -161,6 +191,9 @@
   }
 
   option(productSelect, "hourly", "hourly");
+  if ((forecast.minutely || []).length) {
+    option(productSelect, "minutely", "minutely");
+  }
   if ((forecast.daily || []).length) {
     option(productSelect, "daily", "daily");
   }

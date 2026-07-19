@@ -17,6 +17,10 @@ from grounded_weather_forecast.dashboard.copy import PANEL_COPY, ZONE_INTROS
 from grounded_weather_forecast.dashboard.derive import Derived
 from grounded_weather_forecast.dashboard.model import Panel, Stat, TableSpec, Zone
 from grounded_weather_forecast.dashboard.zones.common import empty_panel, fmt
+from grounded_weather_forecast.leads import (
+    DAILY_BUCKET_LABELS,
+    HOURLY_BUCKET_LABELS,
+)
 from grounded_weather_forecast.metrics.probabilistic import (
     pit_from_quantiles,
     reliability_bins,
@@ -107,7 +111,10 @@ def _baseline_panel(stem: str, board: pl.DataFrame) -> Panel | None:
     ).sort("lead_bucket")
     if subset.is_empty():
         return None
-    buckets = subset["lead_bucket"].unique(maintain_order=True).to_list()
+    product = subset["product"][0]
+    canonical = DAILY_BUCKET_LABELS if product == "daily" else HOURLY_BUCKET_LABELS
+    available = set(subset["lead_bucket"].drop_nulls().to_list())
+    buckets = [label for label in canonical if label in available]
     series = []
     for method in _BASELINE_METHODS:
         method_rows = {
@@ -118,15 +125,23 @@ def _baseline_panel(stem: str, board: pl.DataFrame) -> Panel | None:
         }
         if method_rows:
             series.append((method, [method_rows.get(bucket) for bucket in buckets]))
-    climatology = subset.filter(pl.col("method_id") == "climatology")
-    reference = subset.filter(pl.col("method_id") == "best_provider")
+    shortest = buckets[0] if buckets else None
+    shortest_rows = (
+        subset.filter(pl.col("lead_bucket") == shortest)
+        if shortest is not None
+        else pl.DataFrame()
+    )
+    shortest_mae = {
+        row["method_id"]: row["mae"]
+        for row in shortest_rows.iter_rows(named=True)
+        if row["mae"] is not None
+    }
+    climatology = shortest_mae.get("climatology")
+    reference = shortest_mae.get("best_provider")
     suspicious = (
-        not climatology.is_empty()
-        and not reference.is_empty()
-        and climatology["mae"].min() is not None
-        and reference["mae"].min() is not None
-        and float(str(climatology["mae"].min()))
-        < float(str(reference["mae"].min()))
+        climatology is not None
+        and reference is not None
+        and float(climatology) < float(reference)
     )
     return Panel(
         panel_id=f"d3-{stem}",
@@ -217,9 +232,11 @@ def _pit_values(scores: pl.DataFrame) -> np.ndarray:
 
 
 def _calibration_panel(stem: str, scores: pl.DataFrame, board: pl.DataFrame) -> Panel:
-    probabilistic = board.filter(pl.col("crps").is_not_null()) if (
-        "crps" in board.columns
-    ) else pl.DataFrame()
+    probabilistic = (
+        board.filter(pl.col("crps").is_not_null())
+        if ("crps" in board.columns)
+        else pl.DataFrame()
+    )
     pit = _pit_values(scores)
     if probabilistic.is_empty() and pit.size == 0:
         return empty_panel(
@@ -238,8 +255,10 @@ def _calibration_panel(stem: str, scores: pl.DataFrame, board: pl.DataFrame) -> 
         ("sharpness", "sharpness"),
     ):
         if column in probabilistic.columns and not probabilistic.is_empty():
-            value = probabilistic[column].min() if column == "crps" else (
-                probabilistic[column].mean()
+            value = (
+                probabilistic[column].min()
+                if column == "crps"
+                else (probabilistic[column].mean())
             )
             if value is not None:
                 stats.append(Stat(label, fmt(float(str(value)), 3)))
@@ -319,7 +338,9 @@ def build(ctx: DashboardContext, derived: Derived) -> Zone:
         if winners is not None:
             panels.append(
                 _winners_panel(
-                    stem, winners, ctx.config.promotion.rule,
+                    stem,
+                    winners,
+                    ctx.config.promotion.rule,
                     ctx.config.promotion.alpha,
                 )
             )

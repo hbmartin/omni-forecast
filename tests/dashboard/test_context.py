@@ -1,7 +1,13 @@
 import json
 from datetime import UTC, datetime
 
-from conftest import synthetic_hourly_matrix, write_config
+import polars as pl
+from conftest import (
+    make_forecast_db,
+    make_station_db,
+    synthetic_hourly_matrix,
+    write_config,
+)
 
 from grounded_weather_forecast.dashboard.context import collect_context
 from grounded_weather_forecast.dataset.matrix import matrix_path
@@ -47,3 +53,43 @@ def test_populated_context_loads_matrix_and_manifest(tmp_path):
     assert ctx.hourly_matrix.height == matrix.height
     assert ctx.manifest is not None
     assert ctx.manifest["fingerprint"] == "abc"
+
+
+def test_context_reads_actual_archive_location(tmp_path):
+    config = write_config(tmp_path)
+    make_forecast_db(
+        config.forecasts.db_path,
+        [
+            {
+                "completed_at": NOW.isoformat(),
+                "latitude": 35.0,
+                "longitude": -118.0,
+                "results": [],
+            }
+        ],
+    )
+
+    assert collect_context(config, now=NOW).archive_location == (35.0, -118.0)
+
+
+def test_qc_distinguishes_recovered_flatline_from_active_state(tmp_path):
+    config = write_config(
+        tmp_path,
+        extra_toml="\n[qc.flatline_minutes]\ntemp = 2\n",
+    )
+    make_station_db(
+        config.station.db_path,
+        [
+            ("2026-07-18 04:00:00", {"outTemp": 70.0}),
+            ("2026-07-18 04:01:00", {"outTemp": 70.0}),
+            ("2026-07-18 04:02:00", {"outTemp": 70.0}),
+            ("2026-07-18 04:03:00", {"outTemp": 71.0}),
+        ],
+    )
+
+    qc = collect_context(config, now=NOW).qc
+
+    assert qc is not None
+    temp = qc.filter(pl.col("channel") == "temp").row(0, named=True)
+    assert temp["flatline"] > 0
+    assert temp["active_flatline"] is False

@@ -100,13 +100,11 @@ def _reasons_panel(ctx: DashboardContext) -> Panel:
     for reason in reasons:
         counts_by_date = {
             str(row["date"]): int(row["len"])
-            for row in daily.filter(
-                pl.col("selection_reason") == reason
-            ).iter_rows(named=True)
+            for row in daily.filter(pl.col("selection_reason") == reason).iter_rows(
+                named=True
+            )
         }
-        series.append(
-            (reason, [float(counts_by_date.get(date, 0)) for date in dates])
-        )
+        series.append((reason, [float(counts_by_date.get(date, 0)) for date in dates]))
     degraded = history.filter(
         pl.col("selection_reason").str.starts_with("degraded")
         | pl.col("selection_reason").str.starts_with("no backtest evidence")

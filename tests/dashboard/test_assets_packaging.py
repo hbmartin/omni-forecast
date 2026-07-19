@@ -14,4 +14,7 @@ def test_vendored_chart_js_ships_with_the_package():
 
 def test_css_and_js_assets_ship_with_the_package():
     assert "--surface" in _asset("dashboard.css")
-    assert "dashboard-data" in _asset("dashboard.js")
+    script = _asset("dashboard.js")
+    assert "dashboard-data" in script
+    assert 'product === "minutely"' in script
+    assert "pointKey(productSelect.value, point)" in script

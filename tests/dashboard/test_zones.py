@@ -10,6 +10,7 @@ from grounded_weather_forecast.dashboard.context import (
 from grounded_weather_forecast.dashboard.derive import Derived, derive
 from grounded_weather_forecast.dashboard.zones import ALL_ZONES
 from grounded_weather_forecast.dashboard.zones import (
+    evaluation,
     liveness,
     readiness,
     serving,
@@ -51,6 +52,31 @@ def test_zone_a_marks_aged_out_providers_grey(tmp_path):
     assert ages_panel.chart is not None
     colors = ages_panel.chart.config["data"]["datasets"][0]["backgroundColor"]
     assert "muted" in colors
+    assert ages_panel.status == "amber"
+    stats = {stat.label: stat.value for stat in ages_panel.stats}
+    assert stats["providers fresh"] == "1/2"
+
+
+def test_baseline_panel_only_flags_climatology_at_shortest_lead():
+    board = pl.DataFrame(
+        {
+            "product": ["hourly"] * 4,
+            "variable": ["temp_c"] * 4,
+            "method_id": [
+                "climatology",
+                "best_provider",
+                "climatology",
+                "best_provider",
+            ],
+            "lead_bucket": ["0-1h", "0-1h", "240h+", "240h+"],
+            "mae": [2.0, 1.0, 1.0, 3.0],
+        }
+    )
+
+    panel = evaluation._baseline_panel("scores_hourly", board)
+
+    assert panel is not None
+    assert panel.status == "ok"
 
 
 def test_zone_c_states_fold_arithmetic(tmp_path):

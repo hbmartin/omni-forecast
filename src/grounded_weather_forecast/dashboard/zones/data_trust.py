@@ -32,7 +32,11 @@ def _station_qc(ctx: DashboardContext) -> Panel:
     ]
     samples = int(qc["samples"].sum())
     clean = int(qc["clean"].sum())
-    flat_channels = qc.filter(pl.col("flatline") > 0)["channel"].to_list()
+    flat_channels = (
+        qc.filter(pl.col("active_flatline"))["channel"].to_list()
+        if "active_flatline" in qc.columns
+        else []
+    )
     status = "amber" if flat_channels else "ok"
     return Panel(
         panel_id="b1",
@@ -64,7 +68,10 @@ def _coverage_calendar(ctx: DashboardContext) -> Panel:
     )
     if not coverage_columns or time_column is None:
         return empty_panel(
-            "b2", "b2", "Truth coverage calendar", "amber",
+            "b2",
+            "b2",
+            "Truth coverage calendar",
+            "amber",
             "hourly truth carries no coverage columns",
         )
     daily = (
@@ -132,7 +139,10 @@ def _provider_nulls(ctx: DashboardContext) -> Panel:
         by_source[source].append(share)
     if not by_source:
         return empty_panel(
-            "b3", "b3", "Provider QC nulling", "amber",
+            "b3",
+            "b3",
+            "Provider QC nulling",
+            "amber",
             "the live matrix carries no forecast columns",
         )
     sources = sorted(by_source)
@@ -166,7 +176,10 @@ def _provenance(ctx: DashboardContext) -> Panel:
         kinds[name] = {str(value) for value in frame["source_kind"].unique()}
     if not kinds:
         return empty_panel(
-            "b4", "b4", "Provenance wall", "info",
+            "b4",
+            "b4",
+            "Provenance wall",
+            "info",
             "no provenance-carrying frames on disk yet",
         )
     mixed = {name for name, values in kinds.items() if len(values) > 1}

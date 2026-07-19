@@ -74,7 +74,9 @@ def _grounding_panel(ctx: DashboardContext) -> Panel:
                     b, _IDENTITY[1]
                 )
                 identity_cells += int(identity)
-                cells.append(f"{a:+.2f}" if math.isclose(b, 1.0) else f"{a:+.2f}·{b:.2f}")
+                cells.append(
+                    f"{a:+.2f}" if math.isclose(b, 1.0) else f"{a:+.2f}·{b:.2f}"
+                )
                 row_classes.append("cell-muted" if identity else "")
             else:
                 cells.append("")
@@ -96,9 +98,7 @@ def _grounding_panel(ctx: DashboardContext) -> Panel:
             "a·b shown when the slope is free). Muted cells fell back to "
             "IDENTITY — no correction is applied there."
         ),
-        table=TableSpec(
-            columns=columns, rows=tuple(rows), cell_classes=tuple(classes)
-        ),
+        table=TableSpec(columns=columns, rows=tuple(rows), cell_classes=tuple(classes)),
     )
 
 
@@ -239,9 +239,7 @@ def _gbm_panel(ctx: DashboardContext) -> Panel:
             "silently absent from the registry — install the wheel to "
             "restore the nonlinear ceiling",
         )
-    snapshot = next(
-        (s for s in ctx.observability_states if s.method_id == "gbm"), None
-    )
+    snapshot = next((s for s in ctx.observability_states if s.method_id == "gbm"), None)
     if snapshot is None:
         return empty_panel(
             "e3",
@@ -368,7 +366,9 @@ def _rankings_panel(ctx: DashboardContext) -> Panel:
         status="ok",
         copy=PANEL_COPY["e5"],
         stats=stats,
-        table=TableSpec(columns=("lead bucket", "ranking (best first)"), rows=tuple(rows)),
+        table=TableSpec(
+            columns=("lead bucket", "ranking (best first)"), rows=tuple(rows)
+        ),
     )
 
 

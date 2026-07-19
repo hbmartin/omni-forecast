@@ -867,11 +867,12 @@ def _record_run(
             code_version=__version__,
         )
         runs.append_run(record, runs.runs_path(config))
-    except (OSError, TypeError, ValueError):
+    except (Exception,):  # noqa: B013 - project style requires tuple clauses
         return
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    started_at = datetime.now(tz=UTC)
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
@@ -879,7 +880,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"config error: {exc}")
         return 2
-    started_at = datetime.now(tz=UTC)
     exit_code: int | None = None
     try:
         exit_code = _dispatch(config, args, parser)

@@ -1,13 +1,15 @@
 """Assemble and write the self-contained dashboard page."""
 
 import json
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
 
 from grounded_weather_forecast import __version__
 from grounded_weather_forecast.config import Config
+from grounded_weather_forecast.contracts import age_col, parse_fx_col
 from grounded_weather_forecast.dashboard.context import (
     DashboardContext,
     collect_context,
@@ -15,14 +17,27 @@ from grounded_weather_forecast.dashboard.context import (
 from grounded_weather_forecast.dashboard.derive import Derived, derive
 from grounded_weather_forecast.dashboard.html import render_page
 from grounded_weather_forecast.dashboard.zones import ALL_ZONES
-from grounded_weather_forecast.evaluation import dataset_fingerprint
 from grounded_weather_forecast.reports.alerts import AlertInputs, evaluate_alerts
 
 _MINUTELY_CAP = 120
+type ProviderInputs = dict[str, dict[str, float | None]]
+type VariableInputs = dict[str, ProviderInputs]
+type PointInputs = dict[str, VariableInputs]
 
 
 def _empty() -> pl.DataFrame:
     return pl.DataFrame()
+
+
+def _as_of_snapshot(
+    matrix: pl.DataFrame | None, issue_time: datetime
+) -> pl.DataFrame | None:
+    if matrix is None or matrix.is_empty() or "issue_time" not in matrix.columns:
+        return None
+    eligible = matrix.filter(pl.col("issue_time") <= issue_time)
+    if eligible.is_empty():
+        return None
+    return eligible.filter(pl.col("issue_time") == eligible["issue_time"].max())
 
 
 def _alert_inputs(ctx: DashboardContext, derived: Derived) -> AlertInputs:
@@ -52,35 +67,97 @@ def _alert_inputs(ctx: DashboardContext, derived: Derived) -> AlertInputs:
         ),
         releases=ctx.releases,
         observability_history=ctx.observability_history,
-        archive_location=(
-            (forecast.latitude, forecast.longitude) if forecast is not None else None
-        ),
+        archive_location=ctx.archive_location,
     )
 
 
-def _latest_inputs(
-    matrix: pl.DataFrame | None,
-) -> dict[str, dict[str, dict[str, object]]]:
-    if matrix is None or matrix.is_empty() or "issue_time" not in matrix.columns:
+def _source_ages(
+    matrix: pl.DataFrame | None, issue_time: datetime
+) -> dict[str, float | None]:
+    matching = _as_of_snapshot(matrix, issue_time)
+    if matching is None:
         return {}
-    newest = matrix.filter(pl.col("issue_time") == matrix["issue_time"].max())
-    if "lead_hours" in newest.columns:
-        newest = newest.sort("lead_hours")
-    row = newest.row(0, named=True)
-    inputs: dict[str, dict[str, dict[str, object]]] = {}
-    for column in matrix.columns:
-        if not column.startswith("fx__"):
-            continue
-        _prefix, source, variable = column.split("__", 2)
-        value = row.get(column)
-        if not isinstance(value, (int, float)):
-            continue
-        age = row.get(f"age__{source}")
-        inputs.setdefault(variable, {})[source] = {
-            "value": round(float(value), 3),
-            "age_hours": round(float(age), 2) if isinstance(age, (int, float)) else None,
-        }
+    row = matching.row(0, named=True)
+    return {
+        column.removeprefix("age__"): (
+            float(value) if isinstance(value := row.get(column), (int, float)) else None
+        )
+        for column in matching.columns
+        if column.startswith("age__")
+    }
+
+
+def _point_key(value: object) -> str:
+    match value:
+        case datetime() | date():
+            return value.isoformat()
+        case _:
+            return str(value)
+
+
+def _matrix_inputs(
+    matrix: pl.DataFrame | None,
+    *,
+    issue_time: datetime,
+    point_column: str,
+    forecast_prefix: str,
+    fallback_ages: Mapping[str, float | None],
+) -> PointInputs:
+    if matrix is None or not {point_column} <= set(matrix.columns):
+        return {}
+    matching = _as_of_snapshot(matrix, issue_time)
+    if matching is None:
+        return {}
+    forecast_columns = [
+        column
+        for column in matching.columns
+        if column.startswith(f"{forecast_prefix}__")
+    ]
+    inputs: PointInputs = {}
+    for row in matching.iter_rows(named=True):
+        point_inputs = inputs.setdefault(_point_key(row[point_column]), {})
+        for column in forecast_columns:
+            value = row.get(column)
+            if not isinstance(value, (int, float)):
+                continue
+            source, variable = parse_fx_col(column)
+            raw_age = row.get(age_col(source), fallback_ages.get(source))
+            point_inputs.setdefault(variable, {})[source] = {
+                "value": round(float(value), 3),
+                "age_hours": (
+                    round(float(raw_age), 2)
+                    if isinstance(raw_age, (int, float))
+                    else None
+                ),
+            }
     return inputs
+
+
+def _served_inputs(ctx: DashboardContext) -> dict[str, PointInputs]:
+    forecast = ctx.latest_forecast
+    if forecast is None:
+        return {}
+    try:
+        issue_time = datetime.fromisoformat(forecast.issued_at)
+    except (ValueError,):  # noqa: B013 - project style requires tuple clauses
+        return {}
+    ages = _source_ages(ctx.hourly_matrix, issue_time)
+    return {
+        "hourly": _matrix_inputs(
+            ctx.hourly_matrix,
+            issue_time=issue_time,
+            point_column="valid_time",
+            forecast_prefix="fx",
+            fallback_ages=ages,
+        ),
+        "daily": _matrix_inputs(
+            ctx.daily_matrix,
+            issue_time=issue_time,
+            point_column="forecast_date",
+            forecast_prefix="fxd",
+            fallback_ages=ages,
+        ),
+    }
 
 
 def _forecast_payload(ctx: DashboardContext) -> dict[str, object] | None:
@@ -111,12 +188,12 @@ def write_dashboard(config: Config, *, now: datetime | None = None) -> Path:
     payload: dict[str, object] = {
         "charts": charts,
         "forecast": _forecast_payload(ctx),
-        "latest_inputs": _latest_inputs(ctx.hourly_matrix),
+        "inputs": _served_inputs(ctx),
     }
     manifest_print = (
         str(ctx.manifest.get("fingerprint", "unknown"))
         if ctx.manifest is not None
-        else dataset_fingerprint(config)
+        else "unknown"
     )
     page = render_page(
         title="grounded-weather-forecast · operator console",

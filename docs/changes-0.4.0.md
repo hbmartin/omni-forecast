@@ -9,10 +9,12 @@ module constant. See [Operator Dashboard](dashboard.md).
 
 Two new on-disk signals feed it:
 
-- **`[dataset].dir/runs.parquet`** — an append-only ledger of every CLI
-  invocation (command, args, timing, exit code or exception name,
+- **`[dataset].dir/runs.parquet`** — an append-only ledger of every command
+  whose configuration loads successfully (command, args, timing, exit code or exception name,
   dataset/config fingerprints, code version). Telemetry never breaks a
-  command: writes take a 5-second lock timeout and swallow failures.
+  command: writes take a 5-second lock timeout and swallow failures. Parser
+  and configuration-loading failures cannot be recorded because that
+  configuration supplies the ledger destination.
 - **`[artifacts].dir/observability/`** — write-only snapshots of each
   fitted blender's compact internals on every `predict` run (grounding
   coefficients, online-expert weights with an ewa/boa trajectory history

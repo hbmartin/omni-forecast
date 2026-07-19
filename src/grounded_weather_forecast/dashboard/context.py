@@ -16,9 +16,11 @@ from grounded_weather_forecast.backtest.scores import load_scores
 from grounded_weather_forecast.config import Config
 from grounded_weather_forecast.contracts import MixedProvenanceError
 from grounded_weather_forecast.dataset.matrix import DatasetPaths, matrix_path
-from grounded_weather_forecast.runs import load_runs, runs_path
+from grounded_weather_forecast.dataset.providers import read_latest_archive_location
+from grounded_weather_forecast.runs import RUNS_SCHEMA, load_runs, runs_path
 from grounded_weather_forecast.serve.history import load_history
 from grounded_weather_forecast.serve.observability import (
+    OBSERVABILITY_HISTORY_SCHEMA,
     ObservabilitySnapshot,
     load_observability_history,
     load_observability_states,
@@ -49,6 +51,7 @@ class DashboardContext:
     observability_states: tuple[ObservabilitySnapshot, ...] = ()
     observability_history: pl.DataFrame = field(default_factory=pl.DataFrame)
     runs: pl.DataFrame = field(default_factory=pl.DataFrame)
+    archive_location: tuple[float, float] | None = None
 
 
 def _try_parquet(path: Path) -> pl.DataFrame | None:
@@ -104,7 +107,10 @@ def _releases(config: Config) -> tuple[Mapping[str, object], ...]:
 
 def _qc_summary(config: Config) -> pl.DataFrame | None:
     from grounded_weather_forecast.dataset.qc import (  # noqa: PLC0415
+        QC_FLATLINE,
+        apply_causal_qc,
         apply_qc,
+        qc_col,
         qc_summary,
     )
     from grounded_weather_forecast.dataset.station import (  # noqa: PLC0415
@@ -116,7 +122,22 @@ def _qc_summary(config: Config) -> pl.DataFrame | None:
         observations = read_observations(config.station)
         if observations.is_empty():
             return None
-        return qc_summary(apply_qc(observations, config.qc, channels), channels)
+        summary = qc_summary(apply_qc(observations, config.qc, channels), channels)
+        causal = apply_causal_qc(observations, config.qc, channels)
+        latest = causal.row(causal.height - 1, named=True)
+        active = pl.DataFrame(
+            {
+                "channel": channels,
+                "active_flatline": [
+                    bool(
+                        (flag := latest.get(qc_col(channel))) is not None
+                        and int(flag) & QC_FLATLINE
+                    )
+                    for channel in channels
+                ],
+            }
+        )
+        return summary.join(active, on="channel", how="left")
     except (OSError, ValueError, pl.exceptions.PolarsError):
         return None
 
@@ -127,6 +148,34 @@ def _history(config: Config) -> pl.DataFrame | None:
     except (OSError, pl.exceptions.PolarsError):
         return None
     return None if frame.is_empty() else frame
+
+
+def _observability_states(config: Config) -> tuple[ObservabilitySnapshot, ...]:
+    try:
+        return load_observability_states(config.artifacts_dir)
+    except (OSError, TypeError, ValueError):
+        return ()
+
+
+def _observability_history(config: Config) -> pl.DataFrame:
+    try:
+        return load_observability_history(config.artifacts_dir)
+    except (OSError, ValueError, pl.exceptions.PolarsError):
+        return pl.DataFrame(schema=OBSERVABILITY_HISTORY_SCHEMA)
+
+
+def _runs(config: Config) -> pl.DataFrame:
+    try:
+        return load_runs(runs_path(config))
+    except (OSError, ValueError, pl.exceptions.PolarsError):
+        return pl.DataFrame(schema=RUNS_SCHEMA)
+
+
+def _archive_location(config: Config) -> tuple[float, float] | None:
+    try:
+        return read_latest_archive_location(config.forecasts)
+    except (OSError,):  # noqa: B013 - project style requires tuple clauses
+        return None
 
 
 def collect_context(config: Config, *, now: datetime | None = None) -> DashboardContext:
@@ -150,7 +199,8 @@ def collect_context(config: Config, *, now: datetime | None = None) -> Dashboard
         releases=_releases(config),
         alignment=_try_json(config.artifacts_dir / "alignment.json"),
         drift=_try_json(config.artifacts_dir / "drift.json"),
-        observability_states=load_observability_states(config.artifacts_dir),
-        observability_history=load_observability_history(config.artifacts_dir),
-        runs=load_runs(runs_path(config)),
+        observability_states=_observability_states(config),
+        observability_history=_observability_history(config),
+        runs=_runs(config),
+        archive_location=_archive_location(config),
     )
