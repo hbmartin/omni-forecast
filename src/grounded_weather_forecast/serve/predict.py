@@ -455,8 +455,10 @@ def _write_curve(
         return
     coherent = np.maximum.accumulate(curve)
     mapped = np.interp(source_levels, union_levels, coherent)
-    for key in tuple(raw):
-        raw[key] = float(np.interp(float(key), source_levels, mapped))
+    # `source_levels` IS this dict's sorted key array, so mapping each key back
+    # through it would interpolate at exact nodes — an identity.
+    for key, value in zip(sorted(raw, key=float), mapped, strict=True):
+        raw[key] = float(value)
 
 
 def _enforce_mapped_pair(
@@ -534,14 +536,22 @@ def _cohere_pair(
                 raise ValueError(msg)
         _write_curve(lower_q, union, lower_curve)
         _write_curve(upper_q, union, upper_curve)
-        _enforce_mapped_pair(
-            lower_q,
-            upper_q,
-            values.get(lower_name),
-            values.get(upper_name),
-            union,
-            adjust=adjust,
-        )
+        # `_enforce_mapped_pair` bounds each knot against its NEIGHBOUR, which
+        # is what keeps two curves coherent between knots once they are
+        # reconstructed on different grids. On a shared grid the union-grid
+        # comparison above is already exact everywhere, so running it would
+        # only clamp each level against an adjacent one and pull an
+        # already-coherent distribution in — on the conformal grid that means
+        # bounding the lower q75 by the upper q25.
+        if not np.array_equal(lower_levels, upper_levels):
+            _enforce_mapped_pair(
+                lower_q,
+                upper_q,
+                values.get(lower_name),
+                values.get(upper_name),
+                union,
+                adjust=adjust,
+            )
     lower = values.get(lower_name)
     upper = values.get(upper_name)
     if lower is not None and upper is not None:

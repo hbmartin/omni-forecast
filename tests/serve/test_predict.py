@@ -637,3 +637,70 @@ class TestPhysicalCoherence:
 
         assert point.values["temp_c"] == 5.0
         assert point.values["dew_point_c"] == 5.0
+
+
+class TestCoherenceLeavesValidDistributionsAlone:
+    """Coherence enforcement must be a no-op on input that is already coherent."""
+
+    LEVELS = (0.05, 0.1, 0.25, 0.75, 0.9, 0.95)
+
+    def _grid(self, mu, sd=2.0):
+        from scipy.stats import norm
+
+        return {str(level): float(norm.ppf(level, mu, sd)) for level in self.LEVELS}
+
+    @pytest.mark.parametrize("depression", [0.5, 1.0, 2.0, 3.0])
+    def test_shared_grid_coherent_dew_point_is_untouched(self, depression):
+        """Regression: the lower q75 was being bounded by the upper q25.
+
+        Both curves live on the same conformal grid and are coherent at every
+        level, so nothing needs adjusting. Enforcing knot-to-neighbour bounds
+        anyway shifted dew-point q75 down by up to 2.2 K -- worst exactly when
+        the dew-point depression is small, i.e. fog and humid nights.
+        """
+        from grounded_weather_forecast.serve.predict import _cohere_pair
+
+        temperature = 21.0
+        dew_point = temperature - depression
+        dew_q, temp_q = self._grid(dew_point), self._grid(temperature)
+        for level in self.LEVELS:
+            assert dew_q[str(level)] <= temp_q[str(level)], "fixture is incoherent"
+        before = dict(dew_q)
+
+        _cohere_pair(
+            {"dew_point_c": dew_point, "temp_c": temperature},
+            {"dew_point_c": dew_q, "temp_c": temp_q},
+            "dew_point_c",
+            "temp_c",
+            adjust="lower",
+        )
+
+        for level in self.LEVELS:
+            assert dew_q[str(level)] == pytest.approx(before[str(level)], abs=1e-9), (
+                f"level {level} moved {dew_q[str(level)] - before[str(level)]:+.3f} K "
+                "on an already-coherent shared grid"
+            )
+
+    def test_differing_grids_are_still_made_coherent(self):
+        """The unequal-grid path -- which needs the neighbour bound -- survives."""
+        import numpy as np
+
+        from grounded_weather_forecast.serve.predict import _cohere_pair
+
+        dew_q = {"0.25": 12.0, "0.75": 18.0}
+        temp_q = {"0.1": 9.0, "0.5": 11.0, "0.9": 13.0}
+        _cohere_pair(
+            {"dew_point_c": 15.0, "temp_c": 11.0},
+            {"dew_point_c": dew_q, "temp_c": temp_q},
+            "dew_point_c",
+            "temp_c",
+            adjust="lower",
+        )
+        grid = np.linspace(0.25, 0.75, 11)
+        dew = np.interp(
+            grid, [float(k) for k in sorted(dew_q, key=float)], sorted(dew_q.values())
+        )
+        temp = np.interp(
+            grid, [float(k) for k in sorted(temp_q, key=float)], sorted(temp_q.values())
+        )
+        assert np.all(dew <= temp + 1e-9), "dew point must not exceed temperature"
