@@ -189,3 +189,80 @@ class TestLeaderboardProbabilisticColumns:
         assert point_rows["crps"].null_count() == point_rows.height
         coverage = emos_rows["coverage80"].to_numpy()
         assert float(np.median(coverage)) == pytest.approx(0.8, abs=0.15)
+
+
+class TestEmosFitStatus:
+    """A failed fit must be distinguishable from a converged one."""
+
+    def _wind_slice_with_out_of_bound_truth(self):
+        """Wind truth below its own minimum, e.g. a QC gap letting a bad obs in.
+
+        Every candidate truncated normal assigns those rows zero density, so
+        the likelihood is -inf across the whole parameter space.
+        """
+        from dataclasses import replace
+
+        from test_protocol import make_wind_slice
+
+        train = make_wind_slice()
+        y = train.y.copy()
+        y[:5] = -3.0
+        return replace(train, y=y)
+
+    def test_unfittable_truncated_likelihood_falls_back_to_gaussian(self):
+        """Regression: the initial guess was stored verbatim as a fitted model.
+
+        Nelder-Mead cannot converge on an all-infinite simplex, so it returned
+        [0, 1, log(residual_sd), 0] with success unset -- and EMOS went on
+        emitting quantiles from it, reporting family "truncated_normal".
+        """
+        emos = get_factory("emos")().fit(self._wind_slice_with_out_of_bound_truth())
+
+        assert emos._parameters is not None, "the Gaussian fallback must fit"
+        residual_sd_guess = np.array([0.0, 1.0, emos._parameters[2], 0.0])
+        assert not np.allclose(emos._parameters, residual_sd_guess), (
+            "parameters are still the untouched initial guess"
+        )
+        assert emos._fit_family == "gaussian"
+        assert emos._fit_status == "gaussian_fallback"
+
+    def test_thin_bounded_data_reports_its_family_honestly(self):
+        """The row-count guard returned before the family was ever assigned."""
+        from dataclasses import replace
+
+        from test_protocol import make_wind_slice
+
+        train = make_wind_slice()
+        thin = replace(
+            train,
+            x=type(train.x).build(
+                sources=train.x.sources,
+                values=train.x.values[:10],
+                lead_hours=train.x.lead_hours[:10],
+                features=train.x.features[:10],
+                product=train.x.product,
+            ),
+            y=train.y[:10],
+        )
+        emos = get_factory("emos")().fit(thin)
+
+        assert emos._parameters is None
+        assert emos._fit_family == "truncated_normal"
+        assert emos._fit_status == "insufficient_rows"
+
+    def test_minimize_rejects_a_flat_infinite_objective(self):
+        import warnings
+
+        from grounded_weather_forecast.blenders.emos import _minimize
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert _minimize(lambda _: float("inf"), np.zeros(4)) is None
+        assert not caught, "the pre-check must avoid scipy's inf-differencing warning"
+
+    def test_healthy_bounded_data_still_fits_the_truncated_family(self):
+        from test_protocol import make_wind_slice
+
+        emos = get_factory("emos")().fit(make_wind_slice())
+        assert emos._fit_family == "truncated_normal"
+        assert emos._fit_status == "converged"
