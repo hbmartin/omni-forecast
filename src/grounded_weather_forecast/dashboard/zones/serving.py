@@ -29,7 +29,10 @@ def _verification_panel(ctx: DashboardContext, derived: Derived) -> Panel:
     classes: list[tuple[str, ...]] = []
     worst = "ok"
     for row in live.iter_rows(named=True):
-        label = f"{row['product']}.{row['variable']}.{row['method_id']}"
+        label = (
+            f"{row['product']}.{row['variable']}."
+            f"{row['lead_bucket']}.{row['method_id']}"
+        )
         labels.append(label)
         live_maes.append(row["live_mae"])
         backtest_maes.append(row.get("backtest_mae"))
@@ -93,9 +96,14 @@ def _reasons_panel(ctx: DashboardContext) -> Panel:
         .sort("date")
     )
     dates = sorted({str(value) for value in daily["date"].to_list()})
-    reasons = sorted(
-        {str(value) for value in daily["selection_reason"].drop_nulls().to_list()}
-    )[:8]
+    reason_totals = (
+        daily.filter(pl.col("selection_reason").is_not_null())
+        .group_by("selection_reason")
+        .agg(pl.col("len").sum().alias("total"))
+        .sort(["total", "selection_reason"], descending=[True, False])
+        .head(8)
+    )
+    reasons = [str(value) for value in reason_totals["selection_reason"].to_list()]
     series = []
     for reason in reasons:
         counts_by_date = {

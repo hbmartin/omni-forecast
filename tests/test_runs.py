@@ -63,6 +63,34 @@ def test_load_null_fills_missing_columns(tmp_path):
     assert frame.schema == RUNS_SCHEMA
 
 
+def test_load_corrupt_parquet_returns_empty_schema_frame(tmp_path):
+    path = tmp_path / "runs.parquet"
+    path.write_bytes(b"not a parquet file")
+
+    frame = load_runs(path)
+
+    assert frame.is_empty()
+    assert frame.schema == RUNS_SCHEMA
+
+
+def test_load_normalization_failure_returns_empty_schema_frame(tmp_path, monkeypatch):
+    class BrokenFrame:
+        columns = RUNS_SCHEMA.names()
+
+        @staticmethod
+        def with_columns(*_expressions):
+            raise pl.exceptions.ComputeError("corrupt schema")
+
+    path = tmp_path / "runs.parquet"
+    path.touch()
+    monkeypatch.setattr(runs_module.pl, "read_parquet", lambda _path: BrokenFrame())
+
+    frame = load_runs(path)
+
+    assert frame.is_empty()
+    assert frame.schema == RUNS_SCHEMA
+
+
 def test_write_failure_is_swallowed(tmp_path, monkeypatch):
     def boom(frame, path):
         raise OSError("disk full")

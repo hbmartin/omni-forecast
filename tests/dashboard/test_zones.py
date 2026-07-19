@@ -57,6 +57,38 @@ def test_zone_a_marks_aged_out_providers_grey(tmp_path):
     assert stats["providers fresh"] == "1/2"
 
 
+def test_zone_a_freshness_uses_finite_strict_boundary(tmp_path):
+    config = write_config(tmp_path)
+    cap = config.forecasts.max_forecast_age_hours
+    sources = ("fresh", "at_cap", "nan", "infinite", "boolean", "missing")
+    matrix = pl.DataFrame(
+        {
+            "issue_time": [NOW],
+            "age__fresh": [cap - 0.001],
+            "age__at_cap": [cap],
+            "age__nan": [float("nan")],
+            "age__infinite": [float("inf")],
+            "age__boolean": [True],
+            "age__missing": [None],
+        },
+        schema_overrides={"issue_time": pl.Datetime("us", "UTC")},
+    )
+    ctx = DashboardContext(
+        config=config,
+        now=NOW,
+        manifest={"sources": list(sources)},
+        hourly_matrix=matrix,
+    )
+
+    panel = liveness._provider_ages(ctx, sources)
+
+    assert panel.chart is not None
+    stats = {stat.label: stat.value for stat in panel.stats}
+    assert stats["providers fresh"] == "1/6"
+    colors = panel.chart.config["data"]["datasets"][0]["backgroundColor"]
+    assert colors == ["series-1", "muted", "muted", "muted", "muted", "muted"]
+
+
 def test_baseline_panel_only_flags_climatology_at_shortest_lead():
     board = pl.DataFrame(
         {
@@ -123,3 +155,63 @@ def test_zone_f_selection_reason_shares(tmp_path):
     assert shares["degraded share"] == "100%"
     assert reasons_panel.status == "amber"
     assert reasons_panel.chart is not None
+
+
+def test_zone_f_verification_labels_include_lead_bucket(tmp_path):
+    config = write_config(tmp_path)
+    live = pl.DataFrame(
+        {
+            "product": ["hourly", "hourly"],
+            "variable": ["temp_c", "temp_c"],
+            "lead_bucket": ["0-1h", "1-6h"],
+            "method_id": ["boa", "boa"],
+            "n": [10, 10],
+            "live_mae": [1.0, 1.1],
+            "backtest_mae": [0.9, 1.0],
+            "mae_gap": [0.1, 0.1],
+            "live_bias": [0.0, 0.1],
+        }
+    )
+    panel = serving._verification_panel(
+        DashboardContext(config=config, now=NOW),
+        Derived(verification=live),
+    )
+
+    assert panel.chart is not None
+    assert panel.table is not None
+    labels = panel.chart.config["data"]["labels"]
+    assert labels == [
+        "hourly.temp_c.0-1h.boa",
+        "hourly.temp_c.1-6h.boa",
+    ]
+    assert [row[0] for row in panel.table.rows] == labels
+
+
+def test_zone_f_reasons_use_total_frequency_then_name(tmp_path):
+    config = write_config(tmp_path)
+    reasons = ["z-dominant"] * 5 + list("abcdefghi")
+    count = len(reasons)
+    history = pl.DataFrame(
+        {
+            "issued_at": [NOW] * count,
+            "product": ["hourly"] * count,
+            "variable": ["temp_c"] * count,
+            "valid_time": [NOW + timedelta(hours=index) for index in range(count)],
+            "valid_date": [None] * count,
+            "lead_hours": [1.0] * count,
+            "method_id": ["equal_weight"] * count,
+            "y_pred": [10.0] * count,
+            "dataset_fingerprint": ["f"] * count,
+            "release_id": [None] * count,
+            "selection_reason": reasons,
+            "quantiles_json": [None] * count,
+        },
+        schema=HISTORY_SCHEMA,
+    )
+    panel = serving._reasons_panel(
+        DashboardContext(config=config, now=NOW, history=history)
+    )
+
+    assert panel.chart is not None
+    labels = [dataset["label"] for dataset in panel.chart.config["data"]["datasets"]]
+    assert labels == ["z-dominant", "a", "b", "c", "d", "e", "f", "g"]

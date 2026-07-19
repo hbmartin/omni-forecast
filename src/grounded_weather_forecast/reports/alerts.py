@@ -17,6 +17,11 @@ from typing import Literal
 import polars as pl
 
 from grounded_weather_forecast.config import Config
+from grounded_weather_forecast.contracts import (
+    age_col,
+    provider_age_hours,
+    provider_age_is_fresh,
+)
 from grounded_weather_forecast.evaluation import config_fingerprint
 from grounded_weather_forecast.leads import (
     DAILY_BUCKET_LABELS,
@@ -126,10 +131,8 @@ def _station_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
 
 
 def _provider_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
-    threshold = (
-        "config [forecasts].max_forecast_age_hours = "
-        f"{inputs.config.forecasts.max_forecast_age_hours}; manifest.sources"
-    )
+    cap = inputs.config.forecasts.max_forecast_age_hours
+    threshold = f"config [forecasts].max_forecast_age_hours = {cap}; manifest.sources"
     expected = _manifest_sources(inputs.manifest)
     matrix = inputs.hourly_matrix
     if not expected or matrix.is_empty() or "issue_time" not in matrix.columns:
@@ -140,16 +143,12 @@ def _provider_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
         )
     newest = matrix.filter(pl.col("issue_time") == pl.col("issue_time").max())
     row = newest.row(0, named=True)
-    missing = [
-        source
-        for source in expected
-        if not isinstance(row.get(f"age__{source}"), (int, float))
-    ]
+    ages = {source: provider_age_hours(row.get(age_col(source))) for source in expected}
+    missing = [source for source, age in ages.items() if age is None]
     aged = [
         source
-        for source in expected
-        if isinstance(age := row.get(f"age__{source}"), (int, float))
-        and age > inputs.config.forecasts.max_forecast_age_hours
+        for source, age in ages.items()
+        if age is not None and not provider_age_is_fresh(age, cap)
     ]
     alerts: list[Alert] = []
     if missing:
@@ -159,7 +158,8 @@ def _provider_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
                 zone="A",
                 panel_id="provider-dropped",
                 message=(
-                    "providers absent from the newest snapshot: "
+                    "providers absent from the newest snapshot or carrying "
+                    "non-finite ages: "
                     f"{', '.join(sorted(missing))}"
                 ),
                 threshold=threshold,
@@ -233,21 +233,42 @@ def _serving_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
 
 
 def _truth_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
-    floor = inputs.config.dataset.min_hour_coverage
+    hour_floor = inputs.config.dataset.min_hour_coverage
+    day_floor = inputs.config.dataset.min_day_coverage
     threshold = (
-        f"config [dataset].min_hour_coverage = {floor}, "
-        f"min_day_coverage = {inputs.config.dataset.min_day_coverage}"
+        f"config [dataset].min_hour_coverage = {hour_floor}, "
+        f"min_day_coverage = {day_floor}"
     )
-    frame = inputs.hourly_truth
-    coverage_columns = [c for c in frame.columns if c.endswith("_cov")]
-    if frame.is_empty() or not coverage_columns:
+    hourly = inputs.hourly_truth
+    hourly_columns = [c for c in hourly.columns if c.endswith("_cov")]
+    if hourly.is_empty() or not hourly_columns:
         return (_not_evaluable("B", "truth-thinning", "no hourly truth", threshold),)
-    recent = frame.tail(24 * 7)
+    recent_hourly = (
+        hourly.sort("valid_hour") if "valid_hour" in hourly.columns else hourly
+    ).tail(24 * 7)
     thin: dict[str, float] = {}
-    for column in coverage_columns:
-        mean = recent[column].mean()
-        if isinstance(mean, (int, float)) and float(mean) < floor:
+    for column in hourly_columns:
+        mean = recent_hourly[column].mean()
+        if isinstance(mean, (int, float)) and float(mean) < hour_floor:
             thin[column] = float(mean)
+    daily = inputs.daily_truth
+    daily_columns = [
+        column
+        for column in ("coverage_frac", "rain_coverage")
+        if column in daily.columns
+    ]
+    if not daily.is_empty() and daily_columns:
+        recent_daily = (
+            daily.sort("date_local") if "date_local" in daily.columns else daily
+        ).tail(7)
+        daily_labels = {
+            "coverage_frac": "daily.temperature",
+            "rain_coverage": "daily.rain",
+        }
+        for column in daily_columns:
+            mean = recent_daily[column].mean()
+            if isinstance(mean, (int, float)) and float(mean) < day_floor:
+                thin[daily_labels[column]] = float(mean)
     if not thin:
         return ()
     detail = ", ".join(
@@ -261,7 +282,7 @@ def _truth_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
             panel_id="truth-thinning",
             message=(
                 f"trailing-week truth coverage below the floor: {detail}; "
-                "affected hours are nulled out of training"
+                "affected periods are nulled out of training"
             ),
             threshold=threshold,
         ),
@@ -425,6 +446,27 @@ def _argmax_source(state: Mapping[str, object]) -> dict[str, str]:
     return leaders
 
 
+def _latest_leader_transitions(
+    window: pl.DataFrame,
+) -> tuple[bool, dict[str, tuple[str, str]]]:
+    previous: dict[str, str] | None = None
+    comparable = False
+    transitions: dict[str, tuple[str, str]] = {}
+    for row in window.iter_rows(named=True):
+        try:
+            current = _argmax_source(json.loads(row["state_json"]))
+        except (TypeError, ValueError):
+            continue
+        if previous is not None:
+            shared = previous.keys() & current.keys()
+            comparable = comparable or bool(shared)
+            for label in shared:
+                if previous[label] != current[label]:
+                    transitions[label] = (previous[label], current[label])
+        previous = current
+    return comparable, transitions
+
+
 def _backend_swap_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
     threshold = (
         f"leader change across a {_SWAP_WINDOW_DAYS:.0f}d window "
@@ -445,20 +487,10 @@ def _backend_swap_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
     ):
         newest = group.row(group.height - 1, named=True)
         edge = newest["issue_time"] - timedelta(days=_SWAP_WINDOW_DAYS)
-        earlier = group.filter(pl.col("issue_time") <= edge)
-        if earlier.is_empty():
-            continue
-        comparable = True
-        baseline = earlier.row(earlier.height - 1, named=True)
-        try:
-            now_leaders = _argmax_source(json.loads(newest["state_json"]))
-            then_leaders = _argmax_source(json.loads(baseline["state_json"]))
-        except (TypeError, ValueError):
-            continue
-        for label, leader in now_leaders.items():
-            previous = then_leaders.get(label)
-            if previous is None or previous == leader:
-                continue
+        window = group.filter(pl.col("issue_time") >= edge)
+        group_comparable, transitions = _latest_leader_transitions(window)
+        comparable = comparable or group_comparable
+        for label, (previous, leader) in transitions.items():
             alerts.append(
                 Alert(
                     severity="amber",

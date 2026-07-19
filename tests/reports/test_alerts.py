@@ -2,6 +2,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import polars as pl
+import pytest
 from conftest import write_config
 
 from grounded_weather_forecast.reports.alerts import AlertInputs, evaluate_alerts
@@ -108,6 +109,37 @@ def test_provider_dropped_and_aged_out(tmp_path):
     assert "beta" in aged.message
 
 
+def test_provider_freshness_classifies_invalid_and_boundary_ages(tmp_path):
+    sources = ["fresh", "at_cap", "old", "nan", "infinite", "boolean", "missing"]
+    manifest = {**MANIFEST, "sources": sources}
+    matrix = pl.DataFrame(
+        {
+            "issue_time": [NOW],
+            "age__fresh": [11.999],
+            "age__at_cap": [12.0],
+            "age__old": [13.0],
+            "age__nan": [float("nan")],
+            "age__infinite": [float("inf")],
+            "age__boolean": [True],
+            "age__missing": [None],
+        },
+        schema_overrides={"issue_time": pl.Datetime("us", "UTC")},
+    )
+
+    alerts = evaluate_alerts(
+        make_inputs(tmp_path, manifest=manifest, hourly_matrix=matrix)
+    )
+
+    (dropped,) = by_panel(alerts, "provider-dropped")
+    (aged,) = by_panel(alerts, "provider-aged-out")
+    for source in ("nan", "infinite", "boolean", "missing"):
+        assert source in dropped.message
+    for source in ("at_cap", "old"):
+        assert source in aged.message
+    assert "fresh" not in dropped.message.rsplit(": ", 1)[-1].split(", ")
+    assert "fresh" not in aged.message.rsplit(": ", 1)[-1].split(", ")
+
+
 def test_truth_thinning(tmp_path):
     thin = pl.DataFrame({"temp_c_cov": [0.5] * 48, "pressure_sea_hpa_cov": [0.9] * 48})
     alerts = evaluate_alerts(make_inputs(tmp_path, hourly_truth=thin))
@@ -120,6 +152,59 @@ def test_truth_thinning(tmp_path):
     healthy = thin.with_columns(pl.lit(0.95).alias("temp_c_cov"))
     alerts = evaluate_alerts(make_inputs(tmp_path, hourly_truth=healthy))
     assert not by_panel(alerts, "truth-thinning")
+
+
+def test_truth_thinning_includes_daily_temperature_and_rain(tmp_path):
+    config = write_config(tmp_path, min_hour_coverage=0.8, min_day_coverage=0.75)
+    hourly = pl.DataFrame({"temp_c_cov": [0.95] * 24})
+    daily = pl.DataFrame(
+        {
+            "date_local": [
+                (NOW - timedelta(days=offset)).date() for offset in range(7)
+            ],
+            "coverage_frac": [0.6] * 7,
+            "rain_coverage": [0.5] * 7,
+        }
+    )
+
+    alerts = by_panel(
+        evaluate_alerts(
+            make_inputs(
+                tmp_path,
+                config=config,
+                hourly_truth=hourly,
+                daily_truth=daily,
+            )
+        ),
+        "truth-thinning",
+    )
+
+    assert len(alerts) == 1
+    assert "daily.temperature=0.60" in alerts[0].message
+    assert "daily.rain=0.50" in alerts[0].message
+    assert "min_day_coverage = 0.75" in alerts[0].threshold
+
+
+def test_truth_thinning_accepts_older_daily_schema(tmp_path):
+    config = write_config(tmp_path, min_hour_coverage=0.8, min_day_coverage=0.75)
+    hourly = pl.DataFrame({"temp_c_cov": [0.95] * 24})
+    old_daily = pl.DataFrame({"coverage_frac": [0.6] * 7})
+
+    alerts = by_panel(
+        evaluate_alerts(
+            make_inputs(
+                tmp_path,
+                config=config,
+                hourly_truth=hourly,
+                daily_truth=old_daily,
+            )
+        ),
+        "truth-thinning",
+    )
+
+    assert len(alerts) == 1
+    assert "daily.temperature=0.60" in alerts[0].message
+    assert "daily.rain" not in alerts[0].message
 
 
 def test_stuck_sensor(tmp_path):
@@ -232,11 +317,12 @@ def _weight_state(leader_first):
     )
 
 
-def test_backend_swap_detects_leader_flip(tmp_path):
+@pytest.mark.parametrize("age_days", [2, 3])
+def test_backend_swap_detects_leader_flip_inside_window(tmp_path, age_days):
     history = pl.DataFrame(
         {
-            "captured_at": [NOW - timedelta(days=5), NOW],
-            "issue_time": [NOW - timedelta(days=5), NOW],
+            "captured_at": [NOW - timedelta(days=age_days), NOW],
+            "issue_time": [NOW - timedelta(days=age_days), NOW],
             "method_id": ["boa", "boa"],
             "product": ["hourly", "hourly"],
             "variable": ["temp_c", "temp_c"],
@@ -250,6 +336,75 @@ def test_backend_swap_detects_leader_flip(tmp_path):
     )
     assert len(alerts) == 1
     assert "alpha -> beta" in alerts[0].message
+
+
+def test_backend_swap_ignores_pre_window_state(tmp_path):
+    history = pl.DataFrame(
+        {
+            "captured_at": [NOW - timedelta(days=5), NOW],
+            "issue_time": [NOW - timedelta(days=5), NOW],
+            "method_id": ["boa", "boa"],
+            "product": ["hourly", "hourly"],
+            "variable": ["temp_c", "temp_c"],
+            "dataset_fingerprint": ["f", "f"],
+            "state_json": [_weight_state(True), _weight_state(False)],
+        }
+    )
+
+    alerts = by_panel(
+        evaluate_alerts(make_inputs(tmp_path, observability_history=history)),
+        "backend-swap",
+    )
+
+    assert not any(alert.evaluable for alert in alerts)
+
+
+def test_backend_swap_reports_latest_flip_back(tmp_path):
+    history = pl.DataFrame(
+        {
+            "captured_at": [
+                NOW - timedelta(days=2),
+                NOW - timedelta(days=1),
+                NOW,
+            ],
+            "issue_time": [
+                NOW - timedelta(days=2),
+                NOW - timedelta(days=1),
+                NOW,
+            ],
+            "method_id": ["boa"] * 3,
+            "product": ["hourly"] * 3,
+            "variable": ["temp_c"] * 3,
+            "dataset_fingerprint": ["f"] * 3,
+            "state_json": [
+                _weight_state(True),
+                _weight_state(False),
+                _weight_state(True),
+            ],
+        }
+    )
+
+    alerts = by_panel(
+        evaluate_alerts(make_inputs(tmp_path, observability_history=history)),
+        "backend-swap",
+    )
+
+    assert len(alerts) == 1
+    assert "beta -> alpha" in alerts[0].message
+
+
+def test_backend_swap_stable_window_has_no_alert(tmp_path):
+    history = pl.DataFrame(
+        {
+            "captured_at": [NOW - timedelta(days=2), NOW],
+            "issue_time": [NOW - timedelta(days=2), NOW],
+            "method_id": ["boa", "boa"],
+            "product": ["hourly", "hourly"],
+            "variable": ["temp_c", "temp_c"],
+            "dataset_fingerprint": ["f", "f"],
+            "state_json": [_weight_state(True), _weight_state(True)],
+        }
+    )
 
     stable = history.with_columns(pl.lit(_weight_state(True)).alias("state_json"))
     alerts = by_panel(

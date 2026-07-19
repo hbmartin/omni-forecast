@@ -722,9 +722,6 @@ def _cmd_report(config: Config) -> int:
         if is_live and config.predict.history_path.exists():
             try:
                 minute_truth, hourly_truth, daily_truth = build_truth(config)
-            except (OSError, ValueError) as exc:
-                print(f"self-verification skipped: {exc}")
-            else:
                 live = verify_history(
                     config.predict.history_path,
                     hourly_truth,
@@ -737,6 +734,8 @@ def _cmd_report(config: Config) -> int:
                         compare_to_backtest(live, board),
                     )
                 )
+            except (OSError, ValueError) as exc:
+                print(f"self-verification skipped: {exc}")
         report_name = path.stem.replace("scores_", "leaderboard_")
         written.append(
             write_markdown_report(

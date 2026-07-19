@@ -72,17 +72,20 @@ def load_runs(path: Path) -> pl.DataFrame:
     """Read the ledger; absent files and older schemas load as null-filled."""
     if not path.exists():
         return pl.DataFrame(schema=RUNS_SCHEMA)
-    frame = pl.read_parquet(path)
-    missing = [
-        pl.lit(None, dtype=dtype).alias(column)
-        for column, dtype in RUNS_SCHEMA.items()
-        if column not in frame.columns
-    ]
-    return (
-        frame.with_columns(*missing)
-        .select(RUNS_SCHEMA.names())
-        .cast(RUNS_SCHEMA, strict=False)
-    )
+    try:
+        frame = pl.read_parquet(path)
+        missing = [
+            pl.lit(None, dtype=dtype).alias(column)
+            for column, dtype in RUNS_SCHEMA.items()
+            if column not in frame.columns
+        ]
+        return (
+            frame.with_columns(*missing)
+            .select(RUNS_SCHEMA.names())
+            .cast(RUNS_SCHEMA, strict=False)
+        )
+    except (OSError, pl.exceptions.PolarsError):
+        return pl.DataFrame(schema=RUNS_SCHEMA)
 
 
 def _to_frame(record: RunRecord) -> pl.DataFrame:

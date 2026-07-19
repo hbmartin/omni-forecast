@@ -113,7 +113,7 @@ grounded-weather-forecast truth-qc                      # --days 30
 #    absolute error, consumer %-within-3F), the provider error-correlation
 #    matrix, and self-verification of forecasts this system actually served.
 #    Also writes reports/dashboard.html — a fully offline, self-contained
-#    operator console (seven zones: freshness, data trust, learning
+#    operator console (seven zones: liveness, data trust, learning
 #    readiness, evaluation, model internals, serving, explainability) with
 #    threshold alerts sourced from the existing config knobs.
 grounded-weather-forecast report
@@ -174,7 +174,7 @@ uv run ruff check src --fix && uv run ruff format src tests
 uvx --from semgrep==1.170.0 semgrep scan --test --config semgrep/provider-qc.yml semgrep/tests/provider_qc_grouping.py
 uvx --from semgrep==1.170.0 semgrep scan --metrics=off --error --config semgrep/provider-qc.yml src/grounded_weather_forecast/dataset/matrix.py
 uv run pyrefly check src && uv run ty check src
-uv run lizard -Eduplicate -C 27 src
+uv run lizard -Eduplicate -C 27 -x "*/dashboard/assets/*" src
 uv run pytest tests/ --cov=src --cov-report=term-missing
 ```
 
