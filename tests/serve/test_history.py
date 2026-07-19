@@ -269,3 +269,41 @@ class TestVerification:
 
     def test_empty_history(self, tmp_path):
         assert verify_history(tmp_path / "none.parquet", self.truth([20.0])).is_empty()
+
+
+class TestReleaseProvenance:
+    """Each scored row must name the release that actually chose its method."""
+
+    def _rows(self, forecast):
+        from grounded_weather_forecast.serve.history import forecast_to_rows
+
+        return forecast_to_rows(forecast)
+
+    def test_per_variable_release_wins_over_the_document(self):
+        from dataclasses import replace
+
+        forecast = make_forecast()
+        hourly = replace(forecast.hourly[0], release_ids={"temp_c": "release-x"})
+        forecast = replace(
+            forecast, hourly=[hourly], release_ids=["release-y", "release-z"]
+        )
+        rows = self._rows(forecast).filter(
+            (pl.col("product") == "hourly") & (pl.col("variable") == "temp_c")
+        )
+        assert rows["release_id"].to_list() == ["release-x"]
+
+    def test_a_single_document_release_is_inherited(self):
+        """Archived schema-2 documents carry no per-point ids."""
+        from dataclasses import replace
+
+        forecast = replace(make_forecast(), release_ids=["release-only"])
+        rows = self._rows(forecast).filter(pl.col("product") == "hourly")
+        assert set(rows["release_id"].to_list()) == {"release-only"}
+
+    def test_several_document_releases_yield_null_not_a_joined_string(self):
+        """A joined id would match no selection and silently disarm the gate."""
+        from dataclasses import replace
+
+        forecast = replace(make_forecast(), release_ids=["release-y", "release-z"])
+        rows = self._rows(forecast).filter(pl.col("product") == "hourly")
+        assert set(rows["release_id"].to_list()) == {None}

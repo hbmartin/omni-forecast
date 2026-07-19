@@ -492,6 +492,65 @@ class TestMinutelySinglePass:
         # Lead zero is un-anchored, so the live observation is honoured.
         assert values[0] == pytest.approx(21.0, abs=0.5)
 
+    @pytest.mark.parametrize("observation", [21.0, 22.4])
+    def test_mixed_anchor_regimes_stay_inside_the_hourly_bracket(
+        self, la_config, observation
+    ):
+        """Regression: interpolating across a regime boundary anchored twice.
+
+        The far hourly row is ``anchored_*``, so its point already carries a
+        fitted correction. Drawing the minutely path through it while
+        reporting the segment un-anchored added the live-observation residual
+        on top, pushing the nowcast outside the bracketing hourly values --
+        which a monotone interpolation can never legitimately do.
+        """
+        import numpy as np
+        import polars as pl
+
+        from grounded_weather_forecast.serve.predict import (
+            Snapshot,
+            VariableBlend,
+            minutely_product,
+        )
+        from grounded_weather_forecast.timeutil import utc
+
+        low, high = 20.0, 23.0
+        issue = utc(2026, 3, 22, 12, 37)
+        hourly = pl.DataFrame(
+            {
+                "valid_time": [utc(2026, 3, 22, 13), utc(2026, 3, 22, 14)],
+                "lead_hours": [23.0 / 60.0, 83.0 / 60.0],
+            },
+            schema_overrides={"valid_time": pl.Datetime("us", "UTC")},
+        )
+        snapshot = Snapshot(
+            issue_time=issue,
+            hourly=hourly,
+            daily=pl.DataFrame(),
+            minutely=pl.DataFrame(),
+            observation={"temp_c": observation},
+            observation_at=issue,
+        )
+        blend = VariableBlend(
+            point=np.array([low, high]),
+            methods=["grounded_equal_weight", "anchored_fitted_grounded"],
+            reasons=["", ""],
+            release_ids=[None, None],
+            quantiles=[{}, {}],
+        )
+
+        values = [
+            point.temp_c
+            for point in minutely_product(snapshot, {"temp_c": blend}, la_config)
+            if point.temp_c is not None
+        ]
+
+        assert values, "the nowcast must emit temperatures"
+        assert max(values) <= high + 1e-9, (
+            f"emitted {max(values):.3f} above the hourly bracket max {high}"
+        )
+        assert min(values) >= min(low, observation) - 1e-9
+
 
 class TestPhysicalCoherence:
     def test_hourly_points_and_differing_quantile_grids_are_coherent(self):
@@ -578,3 +637,153 @@ class TestPhysicalCoherence:
 
         assert point.values["temp_c"] == 5.0
         assert point.values["dew_point_c"] == 5.0
+
+
+class TestCoherenceLeavesValidDistributionsAlone:
+    """Coherence enforcement must be a no-op on input that is already coherent."""
+
+    LEVELS = (0.05, 0.1, 0.25, 0.75, 0.9, 0.95)
+
+    def _grid(self, mu, sd=2.0):
+        from scipy.stats import norm
+
+        return {str(level): float(norm.ppf(level, mu, sd)) for level in self.LEVELS}
+
+    @pytest.mark.parametrize("depression", [0.5, 1.0, 2.0, 3.0])
+    def test_shared_grid_coherent_dew_point_is_untouched(self, depression):
+        """Regression: the lower q75 was being bounded by the upper q25.
+
+        Both curves live on the same conformal grid and are coherent at every
+        level, so nothing needs adjusting. Enforcing knot-to-neighbour bounds
+        anyway shifted dew-point q75 down by up to 2.2 K -- worst exactly when
+        the dew-point depression is small, i.e. fog and humid nights.
+        """
+        from grounded_weather_forecast.serve.predict import _cohere_pair
+
+        temperature = 21.0
+        dew_point = temperature - depression
+        dew_q, temp_q = self._grid(dew_point), self._grid(temperature)
+        for level in self.LEVELS:
+            assert dew_q[str(level)] <= temp_q[str(level)], "fixture is incoherent"
+        before = dict(dew_q)
+
+        _cohere_pair(
+            {"dew_point_c": dew_point, "temp_c": temperature},
+            {"dew_point_c": dew_q, "temp_c": temp_q},
+            "dew_point_c",
+            "temp_c",
+            adjust="lower",
+        )
+
+        for level in self.LEVELS:
+            assert dew_q[str(level)] == pytest.approx(before[str(level)], abs=1e-9), (
+                f"level {level} moved {dew_q[str(level)] - before[str(level)]:+.3f} K "
+                "on an already-coherent shared grid"
+            )
+
+    def test_differing_grids_are_still_made_coherent(self):
+        """The unequal-grid path -- which needs the neighbour bound -- survives."""
+        import numpy as np
+
+        from grounded_weather_forecast.serve.predict import _cohere_pair
+
+        dew_q = {"0.25": 12.0, "0.75": 18.0}
+        temp_q = {"0.1": 9.0, "0.5": 11.0, "0.9": 13.0}
+        _cohere_pair(
+            {"dew_point_c": 15.0, "temp_c": 11.0},
+            {"dew_point_c": dew_q, "temp_c": temp_q},
+            "dew_point_c",
+            "temp_c",
+            adjust="lower",
+        )
+        grid = np.linspace(0.25, 0.75, 11)
+        dew = np.interp(
+            grid, [float(k) for k in sorted(dew_q, key=float)], sorted(dew_q.values())
+        )
+        temp = np.interp(
+            grid, [float(k) for k in sorted(temp_q, key=float)], sorted(temp_q.values())
+        )
+        assert np.all(dew <= temp + 1e-9), "dew point must not exceed temperature"
+
+
+class TestServingPathFitting:
+    """`_fit_methods` past its early returns: the warm-start path serving uses.
+
+    Every other test returns at the `no truth sources` / `n_rows == 0` guards,
+    so the artifact round trip, the stateful advance, and the observability
+    snapshot all shipped unexercised through this entry point.
+    """
+
+    def _slice_frames(self):
+        import polars as pl
+        from conftest import synthetic_hourly_matrix
+
+        matrix = synthetic_hourly_matrix(days=12, max_lead=12, seed=77)
+        return matrix, matrix.filter(pl.col("lead_hours") <= 6.0)
+
+    def _fit(self, config, method_ids, issue_time=NOW):
+        import numpy as np  # noqa: F401
+
+        from grounded_weather_forecast.contracts import TruthSemantics, hourly_variable
+        from grounded_weather_forecast.serve.predict import _fit_methods
+
+        train, predict_frame = self._slice_frames()
+        return _fit_methods(
+            train,
+            predict_frame,
+            hourly_variable("temp_c"),
+            method_ids,
+            daily=False,
+            semantics=TruthSemantics.INSTANTANEOUS,
+            config=config,
+            issue_time=issue_time,
+        )
+
+    def test_fits_and_predicts_each_requested_method(self, tmp_path):
+        config = write_config(tmp_path)
+        fitted = self._fit(config, {"equal_weight", "grounded_equal_weight"})
+
+        assert fitted is not None
+        results, x = fitted
+        assert set(results) == {"equal_weight", "grounded_equal_weight"}
+        for result in results.values():
+            assert result.point.shape[0] == x.n_rows
+
+    def test_a_stateful_method_persists_and_warm_starts(self, tmp_path):
+        """Second serve must load the artifact and advance it, not refit."""
+        config = write_config(tmp_path)
+
+        import numpy as np
+
+        first = self._fit(config, {"ewa"})
+        assert first is not None
+        state_dir = config.artifacts_dir / "state"
+        assert list(state_dir.rglob("*.json")), "the serve path must persist state"
+
+        second = self._fit(config, {"ewa"}, issue_time=NOW + timedelta(minutes=10))
+        assert second is not None
+        # Same evidence replayed: the warm start must land where the first did.
+        np.testing.assert_allclose(
+            second[0]["ewa"].point, first[0]["ewa"].point, atol=1e-9
+        )
+
+    def test_a_corrupt_artifact_falls_back_to_a_full_refit(self, tmp_path):
+        """The digest guard's whole point: never silently combine histories."""
+        config = write_config(tmp_path)
+        assert self._fit(config, {"ewa"}) is not None
+        for path in (config.artifacts_dir / "state").rglob("*.json"):
+            path.write_text('{"schema_version": 1}', encoding="utf-8")
+
+        import numpy as np
+
+        refitted = self._fit(config, {"ewa"})
+
+        assert refitted is not None
+        assert np.isfinite(refitted[0]["ewa"].point).any()
+
+    def test_observability_is_snapshotted_through_the_serving_path(self, tmp_path):
+        config = write_config(tmp_path)
+        assert self._fit(config, {"ewa"}) is not None
+        assert list((config.artifacts_dir / "observability").rglob("*.json")), (
+            "the dashboard's only serving-path hook must actually fire"
+        )

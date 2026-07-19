@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +30,9 @@ class HourlyPoint:
     methods: dict[str, str] = field(default_factory=dict)
     quantiles: dict[str, dict[str, float]] = field(default_factory=dict)
     selection_reasons: dict[str, str] = field(default_factory=dict)
+    # Which release chose each variable's method, so a scored row can be
+    # attributed to the promotion that actually served it.
+    release_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +43,7 @@ class DailyPoint:
     methods: dict[str, str] = field(default_factory=dict)
     quantiles: dict[str, dict[str, float]] = field(default_factory=dict)
     selection_reasons: dict[str, str] = field(default_factory=dict)
+    release_ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

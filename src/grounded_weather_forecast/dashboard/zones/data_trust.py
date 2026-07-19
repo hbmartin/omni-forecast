@@ -34,6 +34,14 @@ def _station_qc(ctx: DashboardContext) -> Panel:
     ]
     samples = int(qc["samples"].sum())
     clean = int(qc["clean"].sum())
+    # `clean` counts samples that are both QC_OK and non-null, so the flagged
+    # share must be measured against what the station actually reported.
+    # Dividing by `samples` would count an uninstalled sensor's nulls as
+    # flagged and alarm on a station that raised no QC flag at all; absence is
+    # already reported separately by the `missing` column.
+    reported = (
+        samples - int(qc["missing"].sum()) if "missing" in qc.columns else samples
+    )
     flat_channels = (
         qc.filter(pl.col("active_flatline"))["channel"].to_list()
         if "active_flatline" in qc.columns
@@ -42,7 +50,7 @@ def _station_qc(ctx: DashboardContext) -> Panel:
     # A stuck sensor is current state; a high flagged share is a calibration
     # problem. Both belong in the verdict — counting only the first renders a
     # channel that is 100% out-of-bounds as green.
-    flagged_share = 1.0 - (clean / samples) if samples else 0.0
+    flagged_share = 1.0 - (clean / reported) if reported else 0.0
     flagged_status = (
         "red"
         if flagged_share >= _FLAGGED_RED
@@ -60,7 +68,7 @@ def _station_qc(ctx: DashboardContext) -> Panel:
             Stat("samples", f"{samples:,}"),
             Stat(
                 "clean",
-                f"{clean / samples:.1%}" if samples else "—",
+                f"{clean / reported:.1%}" if reported else "—",
                 flagged_status,
             ),
             Stat(

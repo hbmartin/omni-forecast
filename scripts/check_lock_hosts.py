@@ -1,28 +1,45 @@
-"""Reject dependency lock URLs outside the project's explicit allowlist."""
+"""Reject dependency lock sources outside the project's explicit allowlist."""
 
 import re
 from pathlib import Path
 from urllib.parse import urlparse
 
 APPROVED_HOSTS = frozenset({"files.pythonhosted.org", "pypi.org"})
-URL_PATTERN = re.compile(r'https://[^"]+')
+# Any scheme, not just https: a `git+ssh://`, `http://` or `file://` source is
+# exactly what an allowlist exists to catch, and matching only https URLs made
+# the check blind to every one of them.
+URL_PATTERN = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\"'\s]+")
+# uv records non-registry dependencies as a source kind rather than a URL, so
+# a `{ path = "../evil" }` or `{ workspace = true }` entry carries no scheme at
+# all and would otherwise pass silently.
+LOCAL_SOURCE_PATTERN = re.compile(r"source\s*=\s*\{\s*(?P<kind>[a-z_]+)\s*=")
+# `editable` is this project itself; anything else pointing outside the
+# registry is what we are looking for.
+APPROVED_SOURCE_KINDS = frozenset({"registry", "editable"})
 
 
 def unapproved_hosts(lockfile: Path) -> set[str]:
-    """Return HTTPS hosts found in the lockfile but absent from the allowlist."""
-    hosts = {
-        urlparse(match.group()).hostname
-        for match in URL_PATTERN.finditer(lockfile.read_text(encoding="utf-8"))
+    """Hosts and non-registry source kinds absent from the allowlist."""
+    text = lockfile.read_text(encoding="utf-8")
+    findings = {
+        host
+        for match in URL_PATTERN.finditer(text)
+        if (host := urlparse(match.group()).hostname) and host not in APPROVED_HOSTS
     }
-    return {host for host in hosts if host and host not in APPROVED_HOSTS}
+    findings |= {
+        f"{kind} source"
+        for match in LOCAL_SOURCE_PATTERN.finditer(text)
+        if (kind := match.group("kind")) not in APPROVED_SOURCE_KINDS
+    }
+    return findings
 
 
 def main() -> int:
     unexpected = sorted(unapproved_hosts(Path("uv.lock")))
     if unexpected:
-        print(f"uv.lock contains unapproved package hosts: {', '.join(unexpected)}")
+        print(f"uv.lock contains unapproved package sources: {', '.join(unexpected)}")
         return 1
-    print("uv.lock package hosts are approved")
+    print("uv.lock package sources are approved")
     return 0
 
 

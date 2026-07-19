@@ -330,7 +330,7 @@ scoring-semantics changes that alter reported numbers; one Python-API rename
   exceeds `live_gap_factor ×` its backtest promise, with the verdict recorded
   in the release ledger.
 - **M11** self-improvement: `OnlineExperts.advance()` treats the matrix as
-  the pending-loss queue (O(new rows) per serve past a persisted watermark;
+  the pending-loss queue (only rows past each bucket's target-time cursor are consumed;
   the dormant `ArtifactStore` now carries expert state on the serve path,
   with fingerprint/source-set mismatch falling back to a full refit);
   `reports/drift.py` runs two tiers — instant provider-vs-consensus z-scores

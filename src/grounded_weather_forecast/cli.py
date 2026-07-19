@@ -479,12 +479,20 @@ def _cmd_truth_qc(config: Config, args: argparse.Namespace) -> int:
     )
     print(f"shield: {shield_note}")
     print(f"wrote {config.artifacts_dir / 'truth_qc.json'}")
-    evaluable = (
-        checks.drift_alert is not None,
-        checks.correlation_alert is not None,
-        artifact["shield_alert"] is not None,
-    )
-    return 0 if any(evaluable) else 2
+    # A cold start has no neighbour overlap yet, which is a normal state, not a
+    # failure: the shipped `maintain` cron chains truth-qc, so a non-zero exit
+    # would report the whole nightly job as broken for the first week — and it
+    # is now recorded in the run ledger, where it would read as a real fault.
+    # The verdicts and their reasons are in the artifact either way.
+    if not any(
+        (
+            checks.drift_alert is not None,
+            checks.correlation_alert is not None,
+            artifact["shield_alert"] is not None,
+        )
+    ):
+        print("no check is evaluable yet; see the reasons in truth_qc.json")
+    return 0
 
 
 def _cmd_ingest_ensembles(config: Config, args: argparse.Namespace) -> int:

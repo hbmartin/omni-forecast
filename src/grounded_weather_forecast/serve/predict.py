@@ -36,6 +36,7 @@ from grounded_weather_forecast.contracts import (
     HOURLY_VARIABLES,
     Blender,
     BlendResult,
+    FloatArray,
     ForecastMatrix,
     Product,
     SupervisedSlice,
@@ -312,6 +313,7 @@ def _validated_selection(
         return Selection(
             "equal_weight",
             reason=f"degraded stale selection: unknown method {selection.method_id}",
+            degraded=True,
         )
     if supports_product(selection.method_id, product, variable):
         return selection
@@ -327,7 +329,64 @@ def _validated_selection(
             f"degraded stale selection: {selection.method_id} does not "
             f"support {product.value}.{variable.name}"
         ),
+        degraded=True,
     )
+
+
+def _row_selections(
+    predict_frame: pl.DataFrame,
+    variable: VariableSpec,
+    selections: SelectionMap,
+    config: Config,
+    *,
+    daily: bool,
+    force_method: str | None,
+) -> list[Selection]:
+    """The validated method choice for every row, by its lead bucket."""
+    product = "daily" if daily else "hourly"
+    product_kind = Product.DAILY if daily else Product.HOURLY
+    leads = (
+        predict_frame["lead_days"] if daily else predict_frame["lead_hours"]
+    ).to_list()
+    buckets: list[str | None] = [
+        daily_bucket(lead) if daily else hourly_bucket(lead) for lead in leads
+    ]
+    return [
+        _validated_selection(
+            selection,
+            product_kind,
+            variable,
+            explicit=force_method is not None or selection.pinned,
+        )
+        for selection in (
+            Selection(force_method, reason="forced by --method")
+            if force_method
+            else method_for(selections, product, variable.name, bucket, config)
+            for bucket in buckets
+        )
+    ]
+
+
+def _blended_rows(
+    results: dict[str, BlendResult],
+    chosen: list[Selection],
+    height: int,
+) -> tuple[FloatArray, list[dict[str, float]]]:
+    """Gather each row's point and quantiles from the method that owns it."""
+    point = np.full(height, np.nan)
+    quantiles: list[dict[str, float]] = []
+    for row, selection in enumerate(chosen):
+        result = results[selection.method_id]
+        point[row] = result.point[row]
+        quantiles.append(
+            {
+                str(level): float(result.quantiles[row, index])
+                for index, level in enumerate(result.quantile_levels)
+            }
+            if result.quantiles is not None
+            else {}
+        )
+    return point, quantiles
 
 
 def _blend_variable(
@@ -343,29 +402,14 @@ def _blend_variable(
     issue_time: datetime | None = None,
 ) -> VariableBlend | None:
     """Per row: the prediction of the method selected for that row's bucket."""
-    product = "daily" if daily else "hourly"
-    buckets: list[str | None] = [
-        daily_bucket(lead) if daily else hourly_bucket(lead)
-        for lead in (
-            predict_frame["lead_days"] if daily else predict_frame["lead_hours"]
-        ).to_list()
-    ]
-    chosen: list[Selection] = [
-        Selection(force_method, reason="forced by --method")
-        if force_method
-        else method_for(selections, product, variable.name, bucket, config)
-        for bucket in buckets
-    ]
-    product_kind = Product.DAILY if daily else Product.HOURLY
-    chosen = [
-        _validated_selection(
-            selection,
-            product_kind,
-            variable,
-            explicit=force_method is not None or selection.reason == "pinned in config",
-        )
-        for selection in chosen
-    ]
+    chosen = _row_selections(
+        predict_frame,
+        variable,
+        selections,
+        config,
+        daily=daily,
+        force_method=force_method,
+    )
     fitted = _fit_methods(
         train,
         predict_frame,
@@ -385,7 +429,7 @@ def _blend_variable(
             methods=["equal_weight"] * predict_frame.height,
             reasons=[
                 selection.reason
-                if selection.reason.startswith("degraded stale selection:")
+                if selection.degraded
                 else "degraded cold start: no scoreable training truth"
                 for selection in chosen
             ],
@@ -393,19 +437,7 @@ def _blend_variable(
             quantiles=[{} for _ in range(predict_frame.height)],
         )
     results, _ = fitted
-    point = np.full(predict_frame.height, np.nan)
-    quantiles: list[dict[str, float]] = []
-    for row, selection in enumerate(chosen):
-        result = results[selection.method_id]
-        point[row] = result.point[row]
-        quantiles.append(
-            {
-                str(level): float(result.quantiles[row, index])
-                for index, level in enumerate(result.quantile_levels)
-            }
-            if result.quantiles is not None
-            else {}
-        )
+    point, quantiles = _blended_rows(results, chosen, predict_frame.height)
     return VariableBlend(
         point=point,
         methods=[selection.method_id for selection in chosen],
@@ -455,8 +487,10 @@ def _write_curve(
         return
     coherent = np.maximum.accumulate(curve)
     mapped = np.interp(source_levels, union_levels, coherent)
-    for key in tuple(raw):
-        raw[key] = float(np.interp(float(key), source_levels, mapped))
+    # `source_levels` IS this dict's sorted key array, so mapping each key back
+    # through it would interpolate at exact nodes — an identity.
+    for key, value in zip(sorted(raw, key=float), mapped, strict=True):
+        raw[key] = float(value)
 
 
 def _enforce_mapped_pair(
@@ -534,14 +568,22 @@ def _cohere_pair(
                 raise ValueError(msg)
         _write_curve(lower_q, union, lower_curve)
         _write_curve(upper_q, union, upper_curve)
-        _enforce_mapped_pair(
-            lower_q,
-            upper_q,
-            values.get(lower_name),
-            values.get(upper_name),
-            union,
-            adjust=adjust,
-        )
+        # `_enforce_mapped_pair` bounds each knot against its NEIGHBOUR, which
+        # is what keeps two curves coherent between knots once they are
+        # reconstructed on different grids. On a shared grid the union-grid
+        # comparison above is already exact everywhere, so running it would
+        # only clamp each level against an adjacent one and pull an
+        # already-coherent distribution in — on the conformal grid that means
+        # bounding the lower q75 by the upper q25.
+        if not np.array_equal(lower_levels, upper_levels):
+            _enforce_mapped_pair(
+                lower_q,
+                upper_q,
+                values.get(lower_name),
+                values.get(upper_name),
+                union,
+                adjust=adjust,
+            )
     lower = values.get(lower_name)
     upper = values.get(upper_name)
     if lower is not None and upper is not None:
@@ -611,6 +653,43 @@ def _cohere_daily(points: list[DailyPoint]) -> None:
             point.values["temp_min_c"], point.values["temp_max_c"] = high, low
 
 
+def _point_fields(
+    blended: dict[str, VariableBlend],
+    variables: dict[str, VariableSpec],
+    index: int,
+) -> dict[str, dict]:
+    """The per-variable maps every emitted point carries, for one row.
+
+    Shared by the hourly and daily products, which differ only in their point
+    class and time fields — lizard already flagged the two bodies as
+    duplicates, so new maps belong here rather than in both.
+    """
+    return {
+        "values": {
+            name: _finite(result.point[index], variables[name])
+            for name, result in blended.items()
+        },
+        "methods": {name: result.methods[index] for name, result in blended.items()},
+        "quantiles": {
+            name: {
+                level: value
+                for level, raw in result.quantiles[index].items()
+                if (value := _finite(raw, variables[name])) is not None
+            }
+            for name, result in blended.items()
+            if result.quantiles[index]
+        },
+        "selection_reasons": {
+            name: result.reasons[index] for name, result in blended.items()
+        },
+        "release_ids": {
+            name: release
+            for name, result in blended.items()
+            if (release := result.release_ids[index]) is not None
+        },
+    }
+
+
 def hourly_product(
     snapshot: Snapshot,
     train: pl.DataFrame,
@@ -648,23 +727,7 @@ def hourly_product(
             valid_time=row["valid_time"].isoformat(),
             lead_hours=round(float(row["lead_hours"]), 2),
             lead_bucket=row["lead_bucket"],
-            values={
-                name: _finite(result.point[index], variables[name])
-                for name, result in blended.items()
-            },
-            methods={name: result.methods[index] for name, result in blended.items()},
-            quantiles={
-                name: {
-                    level: value
-                    for level, raw in result.quantiles[index].items()
-                    if (value := _finite(raw, variables[name])) is not None
-                }
-                for name, result in blended.items()
-                if result.quantiles[index]
-            },
-            selection_reasons={
-                name: result.reasons[index] for name, result in blended.items()
-            },
+            **_point_fields(blended, variables, index),
         )
         for index, row in enumerate(frame.iter_rows(named=True))
     ]
@@ -709,23 +772,7 @@ def daily_product(
         DailyPoint(
             date_local=row["forecast_date"].isoformat(),
             lead_days=int(row["lead_days"]),
-            values={
-                name: _finite(result.point[index], variables[name])
-                for name, result in blended.items()
-            },
-            methods={name: result.methods[index] for name, result in blended.items()},
-            quantiles={
-                name: {
-                    level: value
-                    for level, raw in result.quantiles[index].items()
-                    if (value := _finite(raw, variables[name])) is not None
-                }
-                for name, result in blended.items()
-                if result.quantiles[index]
-            },
-            selection_reasons={
-                name: result.reasons[index] for name, result in blended.items()
-            },
+            **_point_fields(blended, variables, index),
         )
         for index, row in enumerate(frame.iter_rows(named=True))
     ]
@@ -781,6 +828,17 @@ def _lead_zero_path(
     )
 
 
+def _regime_run(anchored: list[bool], index: int) -> tuple[int, int]:
+    """Inclusive bounds of the contiguous same-regime run containing ``index``."""
+    start = index
+    while start > 0 and anchored[start - 1] == anchored[index]:
+        start -= 1
+    stop = index
+    while stop + 1 < len(anchored) and anchored[stop + 1] == anchored[index]:
+        stop += 1
+    return start, stop
+
+
 def _minute_path(
     leads: np.ndarray,
     path: np.ndarray,
@@ -797,20 +855,25 @@ def _minute_path(
         return value, value, ordered_methods[0].startswith("anchored")
     right = int(np.searchsorted(ordered_leads, lead, side="left"))
     left = max(min(right - 1, ordered_leads.shape[0] - 2), 0)
-    right = left + 1
     # The regime of the row that owns lead zero governs the whole minutely
-    # range. Switching regime mid-range would both step the path and flip the
-    # anchoring decision partway through, so the nowcast would ignore the live
-    # observation for the minutes on the anchored side.
-    anchored = ordered_methods[left].startswith("anchored")
+    # range, and the path may only be drawn from rows sharing it. An
+    # ``anchored_*`` row's point already carries its fitted correction, so
+    # interpolating across the boundary would fold that correction into a
+    # segment reported as un-anchored — anchoring it a second time below, and
+    # letting the nowcast leave the bracketing hourly values entirely.
+    regimes = [method.startswith("anchored") for method in ordered_methods]
+    start, stop = _regime_run(regimes, left)
+    # A single-row run holds flat: relaxing the live observation toward that
+    # row is the honest nowcast, and the handoff to the next regime happens
+    # beyond the minutely horizon rather than as a step inside it.
     segment_leads, segment_path = _lead_zero_path(
-        ordered_leads[[left, right]],
-        ordered_path[[left, right]],
+        ordered_leads[start : stop + 1],
+        ordered_path[start : stop + 1],
     )
     return (
         float(np.interp(lead, segment_leads, segment_path)),
         float(segment_path[0]),
-        anchored,
+        regimes[left],
     )
 
 

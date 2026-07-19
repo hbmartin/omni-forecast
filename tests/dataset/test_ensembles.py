@@ -1,8 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from types import SimpleNamespace
 from datetime import datetime, timedelta
 from threading import Barrier
+from types import SimpleNamespace
 
 import numpy as np
 import polars as pl
@@ -14,8 +14,8 @@ from conftest import (
     write_config,
 )
 
-from grounded_weather_forecast.contracts import hourly_variable
 from grounded_weather_forecast.config import EnsemblesConfig
+from grounded_weather_forecast.contracts import hourly_variable
 from grounded_weather_forecast.dataset.ensembles import (
     EnsembleError,
     append_ensembles,
@@ -323,7 +323,9 @@ class TestTrainServeSymmetry:
         monkeypatch.setattr(
             predict, "build_truth", lambda _config: (empty, empty, empty)
         )
-        monkeypatch.setattr(predict, "build_observation_features", lambda _config: empty)
+        monkeypatch.setattr(
+            predict, "build_observation_features", lambda _config: empty
+        )
         monkeypatch.setattr(
             predict,
             "read_forecast_archive",

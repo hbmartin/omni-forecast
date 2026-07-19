@@ -6,8 +6,8 @@ import polars as pl
 import pytest
 from conftest import make_station_db, write_config
 
-from grounded_weather_forecast import cli as cli_module
 from grounded_weather_forecast import __version__
+from grounded_weather_forecast import cli as cli_module
 from grounded_weather_forecast.cli import build_parser, main
 from grounded_weather_forecast.dataset.neighbors import NeighborChecks
 from grounded_weather_forecast.runs import load_runs
@@ -54,7 +54,7 @@ class TestQcCommand:
         assert code == 2
         assert "config error" in capsys.readouterr().out
 
-    def test_truth_qc_writes_v2_unknown_artifact_and_exits_two(
+    def test_truth_qc_reports_unknown_verdicts_without_failing(
         self, tmp_path, capsys, monkeypatch
     ):
         config = write_config(
@@ -105,12 +105,18 @@ class TestQcCommand:
         artifact = json.loads(
             (config.artifacts_dir / "truth_qc.json").read_text(encoding="utf-8")
         )
-        assert code == 2
+        # A cold start has no neighbour overlap yet. That is a normal state,
+        # not a failure: the shipped `maintain` cron chains truth-qc, so a
+        # non-zero exit would report the whole nightly job as broken for the
+        # first week, and the run ledger would record it as a real fault.
+        assert code == 0
         assert artifact["schema_version"] == 2
         assert artifact["drift_alert"] is None
         assert artifact["correlation_alert"] is None
         assert artifact["shield_alert"] is None
-        assert "overlap: 0 hours" in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert "overlap: 0 hours" in output
+        assert "no check is evaluable yet" in output
 
 
 def test_predict_reports_unsupported_method_without_traceback(

@@ -221,9 +221,13 @@ def backfill_dynamical_long(
             if window["init_time"].shape[0] == 0:
                 continue
             frames.append(_long_frame(_member_mean(window), spec, lag))
-        except Exception as exc:
-            if isinstance(exc, DynamicalBackfillError):
-                raise
+        except DynamicalBackfillError:
+            raise
+        # The Zarr/xarray/icechunk stack raises a wide and version-dependent
+        # set of its own errors; name the kinds a remote store actually
+        # produces rather than swallowing everything, so a MemoryError or a
+        # programming mistake still surfaces as itself.
+        except (OSError, ValueError, LookupError, TypeError) as exc:
             msg = (
                 f"dynamical backfill failed for {model!r} "
                 f"({spec.catalog_id}): {type(exc).__name__}: {exc}"

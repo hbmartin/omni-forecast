@@ -8,8 +8,8 @@ from grounded_weather_forecast.dashboard.context import (
     collect_context,
 )
 from grounded_weather_forecast.dashboard.derive import Derived, derive
-from grounded_weather_forecast.dashboard.zones import ALL_ZONES
 from grounded_weather_forecast.dashboard.zones import (
+    ALL_ZONES,
     evaluation,
     liveness,
     readiness,
@@ -188,9 +188,7 @@ def test_zone_f_degraded_share_is_judged_on_the_trailing_window(tmp_path):
     ctx = DashboardContext(
         config=config, now=NOW, history=_degraded_history(healthy=5000, degraded=400)
     )
-    panel = next(
-        p for p in serving.build(ctx, Derived()).panels if p.panel_id == "f2"
-    )
+    panel = next(p for p in serving.build(ctx, Derived()).panels if p.panel_id == "f2")
     shares = {stat.label: stat.value for stat in panel.stats}
     assert shares["degraded share (last 1d)"] == "100%"
     assert shares["degraded share (lifetime)"] == "7%"
@@ -203,9 +201,7 @@ def test_zone_f_near_total_degradation_is_not_green(tmp_path):
     ctx = DashboardContext(
         config=config, now=NOW, history=_degraded_history(healthy=0, degraded=999)
     )
-    panel = next(
-        p for p in serving.build(ctx, Derived()).panels if p.panel_id == "f2"
-    )
+    panel = next(p for p in serving.build(ctx, Derived()).panels if p.panel_id == "f2")
     assert panel.status == "red"
 
 
@@ -213,11 +209,7 @@ def test_zone_f_unusable_live_scores_are_not_reported_as_a_young_archive(tmp_pat
     """A damaged artifact and an empty one must not render the same."""
     config = write_config(tmp_path)
     ctx = DashboardContext(config=config, now=NOW)
-    young = next(
-        p
-        for p in serving.build(ctx, Derived()).panels
-        if p.panel_id == "f1"
-    )
+    young = next(p for p in serving.build(ctx, Derived()).panels if p.panel_id == "f1")
     damaged = next(
         p
         for p in serving.build(ctx, Derived(live_scores_unusable=True)).panels
@@ -286,3 +278,51 @@ def test_zone_f_reasons_use_total_frequency_then_name(tmp_path):
     assert panel.chart is not None
     labels = [dataset["label"] for dataset in panel.chart.config["data"]["datasets"]]
     assert labels == ["z-dominant", "a", "b", "c", "d", "e", "f", "g"]
+
+
+def _qc_frame(rows):
+    """A qc_summary-shaped frame: one row per channel."""
+    return pl.DataFrame(
+        rows,
+        schema={
+            "channel": pl.String,
+            "samples": pl.Int64,
+            "missing": pl.Int64,
+            "out_of_bounds": pl.Int64,
+            "spike": pl.Int64,
+            "flatline": pl.Int64,
+            "clean": pl.Int64,
+        },
+        orient="row",
+    )
+
+
+def _station_qc_panel(tmp_path, qc):
+    from dataclasses import replace
+
+    from grounded_weather_forecast.dashboard.zones import data_trust
+
+    ctx = replace(cold_context(tmp_path), qc=qc)
+    zone = data_trust.build(ctx, derive(ctx))
+    return next(panel for panel in zone.panels if panel.panel_id == "b1")
+
+
+def test_zone_b_ignores_uninstalled_sensors_in_the_flagged_share(tmp_path):
+    """An absent sensor is missing data, not a QC flag.
+
+    `clean` counts QC_OK *and* non-null, so measuring the flagged share
+    against total samples alarmed on a station that raised no flag at all.
+    """
+    clean_channel = ("temp_c", 360, 0, 0, 0, 0, 360)
+    absent = ("pressure_station", 360, 360, 0, 0, 0, 0)
+    panel = _station_qc_panel(tmp_path, _qc_frame([clean_channel, absent]))
+    assert panel.status == "ok"
+    assert dict((stat.label, stat.value) for stat in panel.stats)["clean"] == "100.0%"
+
+
+def test_zone_b_still_flags_a_channel_that_is_wholly_out_of_bounds(tmp_path):
+    """The behaviour the flagged share exists to catch must survive."""
+    clean_channel = ("temp_c", 360, 0, 0, 0, 0, 360)
+    bad = ("humidity_pct", 360, 0, 360, 0, 0, 0)
+    panel = _station_qc_panel(tmp_path, _qc_frame([clean_channel, bad]))
+    assert panel.status == "red"

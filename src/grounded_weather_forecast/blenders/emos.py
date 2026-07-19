@@ -14,6 +14,7 @@ below (wind) use a truncated normal so no probability mass sits on impossible
 values.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Self
@@ -83,6 +84,38 @@ def _spread(x: ForecastMatrix, variable_name: str) -> FloatArray:
     return provider_sd
 
 
+def _minimize(
+    loss: Callable[[FloatArray], float], initial: FloatArray
+) -> FloatArray | None:
+    """Fitted parameters, or ``None`` when the optimizer produced no usable fit.
+
+    Nelder-Mead on an all-infinite simplex cannot converge — every ``nan <=
+    fatol`` test is False — so it burns its whole iteration budget and returns
+    the initial guess with ``success`` unset. Storing that verbatim is
+    indistinguishable from a real fit, so check before the run to skip the
+    wasted work (and the RuntimeWarning scipy emits differencing infinities),
+    and check ``fun`` after it because a finite objective is the property
+    actually being relied on.
+    """
+    if not np.isfinite(loss(initial)):
+        return None
+    optimize = import_module("scipy.optimize")
+    result = optimize.minimize(
+        loss,
+        initial,
+        method="Nelder-Mead",
+        options={"maxiter": 400, "xatol": 1e-4, "fatol": 1e-6},
+    )
+    fitted = np.asarray(result.x, dtype=np.float64)
+    if (
+        not result.success
+        or not np.isfinite(result.fun)
+        or not np.isfinite(fitted).all()
+    ):
+        return None
+    return fitted
+
+
 def _recency_weights(x: ForecastMatrix) -> FloatArray:
     if "issue_time" not in x.features.columns:
         return np.ones(x.n_rows)
@@ -103,6 +136,7 @@ class Emos:
     _variable: VariableSpec | None = None
     _parameters: FloatArray | None = None
     _fit_family: str = "gaussian"
+    _fit_status: str = "unfitted"
 
     def fit(self, train: SupervisedSlice) -> Self:
         self._kind = train.variable.kind
@@ -112,26 +146,38 @@ class Emos:
         spread = _spread(train.x, train.variable.name)
         weights = _recency_weights(train.x)
         scored = np.isfinite(base_point) & np.isfinite(train.y)
+        minimum = train.variable.minimum
+        maximum = train.variable.maximum
+        bounded = minimum is not None or maximum is not None
+        # Assign the family before the row-count guard: reporting "gaussian"
+        # for a bounded variable that never got to fit is a lie about which
+        # family the quantiles will come from, and the field is a dataclass
+        # default that would otherwise carry over between fits.
+        self._fit_family = "truncated_normal" if bounded else "gaussian"
         if int(scored.sum()) < _MIN_FIT_ROWS:
             self._parameters = None
+            self._fit_status = "insufficient_rows"
             return self
         y = train.y[scored]
         base = base_point[scored]
         log_spread = np.log(np.maximum(spread[scored], _MIN_SIGMA))
         w = weights[scored] / weights[scored].sum()
         residual_sd = max(float(np.std(y - base)), _MIN_SIGMA)
+        initial = np.array([0.0, 1.0, np.log(residual_sd), 0.0])
 
-        minimum = train.variable.minimum
-        maximum = train.variable.maximum
-        bounded = minimum is not None or maximum is not None
-        stats = import_module("scipy.stats") if bounded else None
-        self._fit_family = "truncated_normal" if bounded else "gaussian"
-
-        def loss(parameters: FloatArray) -> float:
+        def gaussian_loss(parameters: FloatArray) -> float:
             a, b, c, d = parameters
             mu = a + b * base
             sigma = np.maximum(np.exp(c + d * log_spread), _MIN_SIGMA)
-            if stats is not None:
+            return float((w * gaussian_crps(y, mu, sigma)).sum())
+
+        if bounded:
+            stats = import_module("scipy.stats")
+
+            def truncated_loss(parameters: FloatArray) -> float:
+                a, b, c, d = parameters
+                mu = a + b * base
+                sigma = np.maximum(np.exp(c + d * log_spread), _MIN_SIGMA)
                 lower = -np.inf if minimum is None else (minimum - mu) / sigma
                 upper = np.inf if maximum is None else (maximum - mu) / sigma
                 log_likelihood = stats.truncnorm.logpdf(
@@ -140,16 +186,25 @@ class Emos:
                 if not np.isfinite(log_likelihood).all():
                     return float("inf")
                 return float(-(w * log_likelihood).sum())
-            return float((w * gaussian_crps(y, mu, sigma)).sum())
 
-        optimize = import_module("scipy.optimize")
-        result = optimize.minimize(
-            loss,
-            np.array([0.0, 1.0, np.log(residual_sd), 0.0]),
-            method="Nelder-Mead",
-            options={"maxiter": 400, "xatol": 1e-4, "fatol": 1e-6},
+            if (fitted := _minimize(truncated_loss, initial)) is not None:
+                self._parameters = fitted
+                self._fit_status = "converged"
+                return self
+        # A single out-of-support observation makes the truncated likelihood
+        # inf across the whole parameter space, which no optimizer can escape.
+        # Falling back to the always-finite Gaussian CRPS keeps EMOS on the
+        # board with honest parameters; `_quantiles` still emits the truncated
+        # family the variable's bounds call for, so only the estimator changes.
+        self._fit_family = "gaussian"
+        self._parameters = _minimize(gaussian_loss, initial)
+        self._fit_status = (
+            "unfitted"
+            if self._parameters is None
+            else "gaussian_fallback"
+            if bounded
+            else "converged"
         )
-        self._parameters = np.asarray(result.x, dtype=np.float64)
         return self
 
     def _distribution(self, x: ForecastMatrix) -> tuple[FloatArray, FloatArray]:
@@ -196,6 +251,37 @@ class Emos:
             quantiles=quantiles,
             quantile_levels=QUANTILE_LEVELS,
         )
+
+    def to_state(self) -> dict[str, object]:
+        """Glass-box view of the fitted head.
+
+        ``fit_family`` and ``serving_family`` are reported separately on
+        purpose: after a Gaussian fallback the loss that was optimized and the
+        family the quantiles come from genuinely differ, and collapsing them
+        is the reporting failure this fit-status work exists to end.
+        """
+        minimum = self._variable.minimum if self._variable else None
+        maximum = self._variable.maximum if self._variable else None
+        bounded = minimum is not None or maximum is not None
+        parameters = self._parameters
+        return {
+            "schema_version": 1,
+            "method_id": self.method_id,
+            "variable": self._variable.name if self._variable else None,
+            "kind": self._kind.value,
+            "fit_family": self._fit_family,
+            "serving_family": "truncated_normal" if bounded else "gaussian",
+            "fit_status": self._fit_status,
+            "fitted": parameters is not None,
+            "coefficients": None
+            if parameters is None
+            else {
+                "mean_intercept": float(parameters[0]),
+                "mean_slope": float(parameters[1]),
+                "log_sigma_intercept": float(parameters[2]),
+                "log_sigma_slope": float(parameters[3]),
+            },
+        }
 
 
 def _emos() -> Blender:
