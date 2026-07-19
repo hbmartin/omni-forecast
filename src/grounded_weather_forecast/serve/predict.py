@@ -313,6 +313,7 @@ def _validated_selection(
         return Selection(
             "equal_weight",
             reason=f"degraded stale selection: unknown method {selection.method_id}",
+            degraded=True,
         )
     if supports_product(selection.method_id, product, variable):
         return selection
@@ -328,6 +329,7 @@ def _validated_selection(
             f"degraded stale selection: {selection.method_id} does not "
             f"support {product.value}.{variable.name}"
         ),
+        degraded=True,
     )
 
 
@@ -354,7 +356,7 @@ def _row_selections(
             selection,
             product_kind,
             variable,
-            explicit=force_method is not None or selection.reason == "pinned in config",
+            explicit=force_method is not None or selection.pinned,
         )
         for selection in (
             Selection(force_method, reason="forced by --method")
@@ -427,7 +429,7 @@ def _blend_variable(
             methods=["equal_weight"] * predict_frame.height,
             reasons=[
                 selection.reason
-                if selection.reason.startswith("degraded stale selection:")
+                if selection.degraded
                 else "degraded cold start: no scoreable training truth"
                 for selection in chosen
             ],

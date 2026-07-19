@@ -312,3 +312,62 @@ class TestPValuesMonotone:
         eliminated = set(ids) - set(result.survivors)
         assert set(result.p_values) == eliminated
         assert all(0.0 <= p < 0.1 for p in result.p_values.values())
+
+
+class TestSelectionFlagsDriveBehaviour:
+    """Reason text is for humans; behaviour must read the flags."""
+
+    def _selection(self, **overrides):
+        base = {
+            "method_id": "gbm",
+            "reason": "lowest backtest MAE",
+            "n": 40,
+            "mae": 1.0,
+            "dataset_fingerprint": "dataset-a",
+        }
+        return {("hourly", "temp_c", "24-48h"): Selection(**(base | overrides))}
+
+    def _live(self):
+        return pl.DataFrame(
+            {
+                "product": ["hourly"],
+                "variable": ["temp_c"],
+                "lead_bucket": ["24-48h"],
+                "method_id": ["gbm"],
+                "dataset_fingerprint": ["dataset-a"],
+                "release_id": ["release-a"],
+                "n": [50],
+                "live_mae": [5.0],
+                "live_rmse": [5.0],
+                "live_bias": [0.0],
+            }
+        )
+
+    def test_a_pinned_method_is_never_demoted(self):
+        gated = apply_live_gate(
+            self._selection(pinned=True, reason="pinned in config"),
+            self._live(),
+            factor=1.5,
+            min_n=24,
+        )
+        assert gated[("hourly", "temp_c", "24-48h")].method_id == "gbm"
+
+    def test_rewording_the_reason_does_not_change_the_verdict(self):
+        """The old code matched the literal string, so a reword silently
+        turned a pinned method into a demotable one."""
+        gated = apply_live_gate(
+            self._selection(pinned=True, reason="pinned by operator config"),
+            self._live(),
+            factor=1.5,
+            min_n=24,
+        )
+        assert gated[("hourly", "temp_c", "24-48h")].method_id == "gbm"
+
+    def test_an_unpinned_method_with_pinned_sounding_text_is_still_gated(self):
+        gated = apply_live_gate(
+            self._selection(reason="pinned in config"),
+            self._live(),
+            factor=1.5,
+            min_n=24,
+        )
+        assert gated[("hourly", "temp_c", "24-48h")].method_id == "equal_weight"

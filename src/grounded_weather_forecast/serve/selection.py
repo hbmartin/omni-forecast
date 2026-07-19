@@ -40,10 +40,17 @@ _LIVE_EVIDENCE_WINDOW = timedelta(days=14)
 
 @dataclass(frozen=True, slots=True)
 class Selection:
-    """The chosen method for one slice, and why."""
+    """The chosen method for one slice, and why.
+
+    ``reason`` is display text. Anything that changes behaviour reads the
+    flags instead: a reworded message must never silently turn a pinned
+    method into a degradable one.
+    """
 
     method_id: str
     reason: str
+    pinned: bool = False
+    degraded: bool = False
     n: int = 0
     mae: float | None = None
     evaluation_id: str | None = None
@@ -343,7 +350,10 @@ def select_methods(
     for (product, variable), method_id in pinned.items():
         for key in [key for key in selections if key[:2] == (product, variable)]:
             selections[key] = replace(
-                selections[key], method_id=method_id, reason="pinned in config"
+                selections[key],
+                method_id=method_id,
+                reason="pinned in config",
+                pinned=True,
             )
     if not selections:
         return selections
@@ -425,11 +435,7 @@ def _live_verdict(
     min_n: int,
 ) -> str | None:
     """The demotion reason for this slice, or ``None`` to leave it standing."""
-    if (
-        selected.method_id == FALLBACK_METHOD
-        or selected.reason == "pinned in config"
-        or selected.mae is None
-    ):
+    if selected.method_id == FALLBACK_METHOD or selected.pinned or selected.mae is None:
         return None
     product, variable, bucket = key
     measured = pooled.get((product, variable, bucket, selected.method_id))
@@ -558,7 +564,7 @@ def method_for(
     if config is not None:
         pinned = _pins(config).get((product, variable))
         if pinned is not None:
-            return Selection(pinned, reason="pinned in config")
+            return Selection(pinned, reason="pinned in config", pinned=True)
     if lead_bucket is not None:
         found = selections.get((product, variable, lead_bucket))
         if found is not None:
