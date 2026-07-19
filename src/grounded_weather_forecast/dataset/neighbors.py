@@ -36,6 +36,7 @@ _MIN_NEIGHBORS = 3
 _DRIFT_ALERT_C = 1.0
 _CORRELATION_FLOOR = 0.9
 _CORRELATION_WINDOW_HOURS = 72
+_MIN_CORRELATION_SAMPLES = _CORRELATION_WINDOW_HOURS // 2
 _DRIFT_WINDOW_DAYS = 30
 _MIN_DRIFT_DAYS = 7
 _DEFAULT_HISTORY_HOURS = 30 * 24
@@ -225,7 +226,7 @@ def cross_check(truth_hourly: pl.DataFrame, consensus: pl.DataFrame) -> Neighbor
             pl.col("t__temp_c__inst"),
             pl.col("consensus_c"),
             window_size=_CORRELATION_WINDOW_HOURS,
-            min_samples=_CORRELATION_WINDOW_HOURS // 2,
+            min_samples=_MIN_CORRELATION_SAMPLES,
         ).alias("correlation")
     ).select("valid_hour", "correlation")
     latest = correlation.drop_nulls("correlation").tail(1)
@@ -251,7 +252,10 @@ def cross_check(truth_hourly: pl.DataFrame, consensus: pl.DataFrame) -> Neighbor
         correlation_reason=(
             f"latest rolling correlation {latest_correlation:.3f}"
             if correlation_evaluable
-            else "need at least 36 overlapping hourly comparisons"
+            else (
+                f"need at least {_MIN_CORRELATION_SAMPLES} overlapping hourly"
+                f" comparisons; got {joined.height}"
+            )
         ),
     )
 

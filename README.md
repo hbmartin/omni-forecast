@@ -82,7 +82,7 @@ grounded-weather-forecast build-dataset
 #    of stored *vintages*, so a new one can say nothing yet. Open-Meteo's
 #    Previous Runs API backfills real archived forecasts (leads of exactly 1-7
 #    days) for open NWP models, tagged `synthetic` and never pooled with live.
-grounded-weather-forecast backfill --end 2026-07-12   # --models, --chunk-days
+grounded-weather-forecast backfill --end 2026-07-12   # --models, --start, --chunk-days
 
 #    A second backfill provider reads dynamical.org's free Zarr archives of
 #    FULL forecast cycles (GEFS since 2020, AIFS-ENS since 2025-07) at native

@@ -330,9 +330,11 @@ PANEL_COPY: Mapping[str, PanelCopy] = {
             "cannot catch by construction."
         ),
         thresholds=(
-            "Needs >= 5 realized rows per slice. Red beyond "
-            "[promotion].live_gap_factor x backtest MAE at n >= "
-            "[promotion].min_live_n — the same gate that demotes methods."
+            "Needs >= 5 realized rows per release cohort. Red beyond "
+            "[promotion].live_gap_factor x backtest MAE. This is an early "
+            "warning, not the demotion gate: the gate pools cohorts and also "
+            "requires n >= [promotion].min_live_n, so a slice can show red "
+            "here while the method keeps serving."
         ),
     ),
     "f2": PanelCopy(

@@ -117,15 +117,26 @@ study needs ≥72 overlapping rows per source×variable to make a call, and repo
 
 ### `--methods`
 
-Twelve are registered:
+Run `grounded-weather-forecast backtest --methods all` to sweep every
+registered method; the current roster groups as:
 
 ```
 persistence  climatology  best_provider  equal_weight        <- baselines (the floor)
-grounded_equal_weight  affine_equal_weight  inverse_mse      <- grounding + weighting
-anchored_grounded_equal_weight  anchored_inverse_mse         <- + short-lead anchoring
+grounded_equal_weight  grounded_median_equal_weight
+affine_equal_weight  inverse_mae  inverse_mse
+trimmed_mean  grounded_trimmed_mean                          <- grounding + weighting
+ewma_grounded_equal_weight  ewma_inverse_mae
+harmonic_grounded_equal_weight                               <- drift-tracking grounding
+anchored_grounded_equal_weight  anchored_inverse_mse
+anchored_fitted_grounded  anchored_fitted_ewma
+anchored_trend_grounded                                      <- + short-lead anchoring
 gbm                                                          <- the nonlinear ceiling
 ewa  boa                                                     <- online experts
+emos  idr  conformal_gew  conformal_ewma                     <- distributional heads
 ```
+
+`available_methods()` is the authority; this list is a reading aid, not a
+contract.
 
 `--methods all` runs everything (recommended — the baselines are the point). Or
 name a subset: `--methods gbm,equal_weight,best_provider`.
