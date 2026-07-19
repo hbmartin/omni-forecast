@@ -35,6 +35,7 @@ type Severity = Literal["red", "amber", "info"]
 _SEVERITY_ORDER: Mapping[str, int] = {"red": 0, "amber": 1, "info": 2}
 _MIN_BIAS_SAMPLES = 8  # mirrors leaderboard._MIN_DM_SAMPLES
 _SWAP_WINDOW_DAYS = 3.0  # mirrors drift._FAST_WINDOW_DAYS
+_TRUTH_WINDOW_DAYS = 7.0  # the "trailing week" the message promises
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,39 +241,59 @@ def _truth_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
         f"config [dataset].min_hour_coverage = {hour_floor}, "
         f"min_day_coverage = {day_floor}"
     )
-    hourly = inputs.hourly_truth
-    hourly_columns = [c for c in hourly.columns if c.endswith("_cov")]
-    if hourly.is_empty() or not hourly_columns:
-        return (_not_evaluable("B", "truth-thinning", "no hourly truth", threshold),)
-    recent_hourly = (
-        hourly.sort("valid_hour") if "valid_hour" in hourly.columns else hourly
-    ).tail(24 * 7)
     thin: dict[str, float] = {}
     unusable: list[str] = []
-    for column in hourly_columns:
-        if (mean := finite_number(recent_hourly[column].mean())) is None:
-            unusable.append(column)
-        elif mean < hour_floor:
-            thin[column] = mean
+    evaluated = False
+
+    hourly = inputs.hourly_truth
+    hourly_columns = [c for c in hourly.columns if c.endswith("_cov")]
+    if not hourly.is_empty() and hourly_columns and "valid_hour" in hourly.columns:
+        # A row count is not a week. `tail(24 * 7)` on a gappy archive spanned
+        # 49 days and reported healthy mean coverage while the actual trailing
+        # week sat far below the floor.
+        recent_hourly = hourly.filter(
+            pl.col("valid_hour") >= inputs.now - timedelta(days=_TRUTH_WINDOW_DAYS)
+        )
+        if not recent_hourly.is_empty():
+            evaluated = True
+            for column in hourly_columns:
+                if (mean := finite_number(recent_hourly[column].mean())) is None:
+                    unusable.append(column)
+                elif mean < hour_floor:
+                    thin[column] = mean
+
     daily = inputs.daily_truth
     daily_columns = [
         column
         for column in ("coverage_frac", "rain_coverage")
         if column in daily.columns
     ]
-    if not daily.is_empty() and daily_columns:
-        recent_daily = (
-            daily.sort("date_local") if "date_local" in daily.columns else daily
-        ).tail(7)
-        daily_labels = {
-            "coverage_frac": "daily.temperature",
-            "rain_coverage": "daily.rain",
-        }
-        for column in daily_columns:
-            if (mean := finite_number(recent_daily[column].mean())) is None:
-                unusable.append(daily_labels[column])
-            elif mean < day_floor:
-                thin[daily_labels[column]] = mean
+    # Judged independently of hourly: returning early when hourly truth was
+    # missing silently discarded perfectly good daily coverage.
+    if not daily.is_empty() and daily_columns and "date_local" in daily.columns:
+        horizon = (inputs.now - timedelta(days=_TRUTH_WINDOW_DAYS)).date()
+        recent_daily = daily.filter(pl.col("date_local") >= horizon)
+        if not recent_daily.is_empty():
+            evaluated = True
+            daily_labels = {
+                "coverage_frac": "daily.temperature",
+                "rain_coverage": "daily.rain",
+            }
+            for column in daily_columns:
+                if (mean := finite_number(recent_daily[column].mean())) is None:
+                    unusable.append(daily_labels[column])
+                elif mean < day_floor:
+                    thin[daily_labels[column]] = mean
+
+    if not evaluated:
+        return (
+            _not_evaluable(
+                "B",
+                "truth-thinning",
+                f"no truth in the trailing {_TRUTH_WINDOW_DAYS:.0f} days",
+                threshold,
+            ),
+        )
     alerts: list[Alert] = []
     if unusable:
         alerts.append(

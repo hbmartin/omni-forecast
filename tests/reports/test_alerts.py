@@ -140,8 +140,26 @@ def test_provider_freshness_classifies_invalid_and_boundary_ages(tmp_path):
     assert "fresh" not in aged.message.rsplit(": ", 1)[-1].split(", ")
 
 
+def hourly_coverage(**columns) -> pl.DataFrame:
+    """Hourly truth shaped like the real thing: coverage plus its timestamp.
+
+    `build_truth` always emits `valid_hour`, and the trailing-week alert
+    windows on it, so a fixture without it is not a truth frame.
+    """
+    length = len(next(iter(columns.values())))
+    return pl.DataFrame(
+        {
+            "valid_hour": [
+                NOW - timedelta(hours=offset) for offset in reversed(range(length))
+            ],
+            **columns,
+        },
+        schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+    )
+
+
 def test_truth_thinning(tmp_path):
-    thin = pl.DataFrame({"temp_c_cov": [0.5] * 48, "pressure_sea_hpa_cov": [0.9] * 48})
+    thin = hourly_coverage(temp_c_cov=[0.5] * 48, pressure_sea_hpa_cov=[0.9] * 48)
     alerts = evaluate_alerts(make_inputs(tmp_path, hourly_truth=thin))
     (alert,) = by_panel(alerts, "truth-thinning")
     assert alert.severity == "amber"
@@ -156,7 +174,7 @@ def test_truth_thinning(tmp_path):
 
 def test_truth_thinning_includes_daily_temperature_and_rain(tmp_path):
     config = write_config(tmp_path, min_hour_coverage=0.8, min_day_coverage=0.75)
-    hourly = pl.DataFrame({"temp_c_cov": [0.95] * 24})
+    hourly = hourly_coverage(temp_c_cov=[0.95] * 24)
     daily = pl.DataFrame(
         {
             "date_local": [
@@ -187,8 +205,15 @@ def test_truth_thinning_includes_daily_temperature_and_rain(tmp_path):
 
 def test_truth_thinning_accepts_older_daily_schema(tmp_path):
     config = write_config(tmp_path, min_hour_coverage=0.8, min_day_coverage=0.75)
-    hourly = pl.DataFrame({"temp_c_cov": [0.95] * 24})
-    old_daily = pl.DataFrame({"coverage_frac": [0.6] * 7})
+    hourly = hourly_coverage(temp_c_cov=[0.95] * 24)
+    old_daily = pl.DataFrame(
+        {
+            "date_local": [
+                (NOW - timedelta(days=offset)).date() for offset in range(7)
+            ],
+            "coverage_frac": [0.6] * 7,
+        }
+    )
 
     alerts = by_panel(
         evaluate_alerts(
@@ -588,3 +613,81 @@ class TestDegenerateEvidenceIsNeverGreen:
         empties = by_panel(alerts, "silent-empty")
         assert any("non-finite location" in alert.message for alert in empties)
         assert all(alert.severity == "red" for alert in empties)
+
+
+def test_truth_thinning_window_is_a_week_not_a_row_count(tmp_path):
+    """Regression: `tail(24 * 7)` selected 168 ROWS, not seven days.
+
+    On a gappy archive those 168 rows spanned 49 days of healthy history and
+    reported a comfortable mean, while the actual trailing week sat far below
+    the floor and raised nothing.
+    """
+    healthy_old = pl.DataFrame(
+        {
+            "valid_hour": [NOW - timedelta(days=8 + index) for index in range(160)],
+            "temp_c_cov": [0.98] * 160,
+        },
+        schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+    )
+    thin_recent = pl.DataFrame(
+        {
+            "valid_hour": [NOW - timedelta(hours=index) for index in range(8)],
+            "temp_c_cov": [0.10] * 8,
+        },
+        schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+    )
+    gappy = pl.concat([healthy_old, thin_recent])
+
+    alerts = by_panel(
+        evaluate_alerts(make_inputs(tmp_path, hourly_truth=gappy)), "truth-thinning"
+    )
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == "amber"
+    assert "temp_c=0.10" in alerts[0].message
+
+
+def test_truth_thinning_judges_daily_even_without_hourly(tmp_path):
+    """Regression: a missing hourly frame discarded valid daily coverage."""
+    config = write_config(tmp_path, min_hour_coverage=0.8, min_day_coverage=0.75)
+    daily = pl.DataFrame(
+        {
+            "date_local": [
+                (NOW - timedelta(days=offset)).date() for offset in range(5)
+            ],
+            "coverage_frac": [0.10] * 5,
+        }
+    )
+
+    alerts = by_panel(
+        evaluate_alerts(
+            make_inputs(
+                tmp_path,
+                config=config,
+                hourly_truth=pl.DataFrame(),
+                daily_truth=daily,
+            )
+        ),
+        "truth-thinning",
+    )
+
+    assert len(alerts) == 1
+    assert "daily.temperature=0.10" in alerts[0].message
+
+
+def test_truth_thinning_is_not_evaluable_without_recent_truth(tmp_path):
+    """An archive that stopped a month ago has nothing to say about this week."""
+    stale = pl.DataFrame(
+        {
+            "valid_hour": [NOW - timedelta(days=30 + index) for index in range(48)],
+            "temp_c_cov": [0.10] * 48,
+        },
+        schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+    )
+
+    (alert,) = by_panel(
+        evaluate_alerts(make_inputs(tmp_path, hourly_truth=stale)), "truth-thinning"
+    )
+
+    assert alert.severity == "info"
+    assert "trailing 7 days" in alert.message
