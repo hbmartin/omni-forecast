@@ -621,6 +621,43 @@ def _cohere_daily(points: list[DailyPoint]) -> None:
             point.values["temp_min_c"], point.values["temp_max_c"] = high, low
 
 
+def _point_fields(
+    blended: dict[str, VariableBlend],
+    variables: dict[str, VariableSpec],
+    index: int,
+) -> dict[str, dict]:
+    """The per-variable maps every emitted point carries, for one row.
+
+    Shared by the hourly and daily products, which differ only in their point
+    class and time fields — lizard already flagged the two bodies as
+    duplicates, so new maps belong here rather than in both.
+    """
+    return {
+        "values": {
+            name: _finite(result.point[index], variables[name])
+            for name, result in blended.items()
+        },
+        "methods": {name: result.methods[index] for name, result in blended.items()},
+        "quantiles": {
+            name: {
+                level: value
+                for level, raw in result.quantiles[index].items()
+                if (value := _finite(raw, variables[name])) is not None
+            }
+            for name, result in blended.items()
+            if result.quantiles[index]
+        },
+        "selection_reasons": {
+            name: result.reasons[index] for name, result in blended.items()
+        },
+        "release_ids": {
+            name: release
+            for name, result in blended.items()
+            if (release := result.release_ids[index]) is not None
+        },
+    }
+
+
 def hourly_product(
     snapshot: Snapshot,
     train: pl.DataFrame,
@@ -658,23 +695,7 @@ def hourly_product(
             valid_time=row["valid_time"].isoformat(),
             lead_hours=round(float(row["lead_hours"]), 2),
             lead_bucket=row["lead_bucket"],
-            values={
-                name: _finite(result.point[index], variables[name])
-                for name, result in blended.items()
-            },
-            methods={name: result.methods[index] for name, result in blended.items()},
-            quantiles={
-                name: {
-                    level: value
-                    for level, raw in result.quantiles[index].items()
-                    if (value := _finite(raw, variables[name])) is not None
-                }
-                for name, result in blended.items()
-                if result.quantiles[index]
-            },
-            selection_reasons={
-                name: result.reasons[index] for name, result in blended.items()
-            },
+            **_point_fields(blended, variables, index),
         )
         for index, row in enumerate(frame.iter_rows(named=True))
     ]
@@ -719,23 +740,7 @@ def daily_product(
         DailyPoint(
             date_local=row["forecast_date"].isoformat(),
             lead_days=int(row["lead_days"]),
-            values={
-                name: _finite(result.point[index], variables[name])
-                for name, result in blended.items()
-            },
-            methods={name: result.methods[index] for name, result in blended.items()},
-            quantiles={
-                name: {
-                    level: value
-                    for level, raw in result.quantiles[index].items()
-                    if (value := _finite(raw, variables[name])) is not None
-                }
-                for name, result in blended.items()
-                if result.quantiles[index]
-            },
-            selection_reasons={
-                name: result.reasons[index] for name, result in blended.items()
-            },
+            **_point_fields(blended, variables, index),
         )
         for index, row in enumerate(frame.iter_rows(named=True))
     ]

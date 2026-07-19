@@ -42,7 +42,15 @@ _HOURS_PER_DAY = 24.0
 def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
     """Flatten an emitted document into scoreable rows."""
     rows: list[dict[str, object]] = []
-    release_id = ",".join(forecast.release_ids)
+    # Per-variable provenance where the point carries it, falling back to the
+    # document only when it names exactly one release. Joining several ids
+    # into one string would match no selection and silently disarm the live
+    # gate; a null is honest and simply drops out of the pool. Archived
+    # schema-2 documents have no per-point ids, so the fallback is what keeps
+    # them scoreable.
+    document_release = (
+        forecast.release_ids[0] if len(forecast.release_ids) == 1 else None
+    )
     for point in forecast.minutely:
         values = {
             "temp_c": point.temp_c,
@@ -66,7 +74,7 @@ def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
                     "method_id": point.methods.get(variable, "native_or_anchored"),
                     "y_pred": value,
                     "dataset_fingerprint": forecast.dataset_fingerprint,
-                    "release_id": release_id,
+                    "release_id": document_release,
                     "selection_reason": None,
                     "quantiles_json": _quantiles_json(point.quantiles.get(variable)),
                 }
@@ -86,7 +94,7 @@ def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
                     "method_id": point.methods.get(variable, "unknown"),
                     "y_pred": value,
                     "dataset_fingerprint": forecast.dataset_fingerprint,
-                    "release_id": release_id,
+                    "release_id": point.release_ids.get(variable, document_release),
                     "selection_reason": point.selection_reasons.get(variable),
                     "quantiles_json": _quantiles_json(point.quantiles.get(variable)),
                 }
@@ -108,7 +116,7 @@ def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
                     "method_id": daily.methods.get(variable, "unknown"),
                     "y_pred": value,
                     "dataset_fingerprint": forecast.dataset_fingerprint,
-                    "release_id": release_id,
+                    "release_id": daily.release_ids.get(variable, document_release),
                     "selection_reason": daily.selection_reasons.get(variable),
                     "quantiles_json": _quantiles_json(daily.quantiles.get(variable)),
                 }
