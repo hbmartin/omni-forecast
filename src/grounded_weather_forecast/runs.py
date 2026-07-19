@@ -1,4 +1,8 @@
-"""Append-only ledger of every CLI invocation, for the operator dashboard."""
+"""Rolling ledger of every CLI invocation, for the operator dashboard.
+
+Bounded by age (90 days) and row count (50,000) so the 10-minute `predict`
+cadence cannot grow it without limit.
+"""
 
 import hashlib
 import os

@@ -9,7 +9,7 @@ module constant. See [Operator Dashboard](dashboard.md).
 
 Two new on-disk signals feed it:
 
-- **`[dataset].dir/runs.parquet`** — an append-only ledger of every command
+- **`[dataset].dir/runs.parquet`** — a rolling ledger of every command
   whose configuration loads successfully (command, args, timing, exit code or exception name,
   dataset/config fingerprints, code version). Telemetry never breaks a
   command: writes take a 5-second lock timeout and swallow failures. Parser
@@ -48,10 +48,14 @@ Two serving-visible corrections landed alongside the dashboard:
   the row owning lead zero now governs the whole range and the path stays
   interpolated.
 
-No existing artifact schemas changed and no migration is required: the new
-files are additive, the dashboard renders honest "not yet" states wherever
-history hasn't accumulated, and CI's lizard step now excludes the vendored
-Chart.js asset (`-x "*/dashboard/assets/*"`).
+One existing artifact schema changed: `truth_daily.parquet` now emits
+`rain_coverage`, which was previously computed and dropped before the final
+select. No migration is required — `build-dataset` rewrites the file, and
+readers tolerate its absence — but a daily truth parquet written by 0.3.0
+will not carry the column until the next rebuild. Everything else is
+additive, the dashboard renders honest "not yet" states wherever history
+hasn't accumulated, and CI's lizard step now excludes the vendored Chart.js
+asset (`-x "*/dashboard/assets/*"`).
 
 ## Upgrade
 

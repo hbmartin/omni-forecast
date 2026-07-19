@@ -89,8 +89,11 @@ def test_zone_a_freshness_uses_finite_strict_boundary(tmp_path):
     assert colors == ["series-1", "muted", "muted", "muted", "muted", "muted"]
 
 
-def test_baseline_panel_only_flags_climatology_at_shortest_lead():
-    board = pl.DataFrame(
+def _baseline_board(
+    shortest_mae: tuple[float, float], longest_mae: tuple[float, float]
+):
+    """A two-bucket board: (climatology, best_provider) MAE at each lead."""
+    return pl.DataFrame(
         {
             "product": ["hourly"] * 4,
             "variable": ["temp_c"] * 4,
@@ -101,14 +104,36 @@ def test_baseline_panel_only_flags_climatology_at_shortest_lead():
                 "best_provider",
             ],
             "lead_bucket": ["0-1h", "0-1h", "240h+", "240h+"],
-            "mae": [2.0, 1.0, 1.0, 3.0],
+            "mae": [*shortest_mae, *longest_mae],
         }
     )
+
+
+def test_baseline_panel_only_flags_climatology_at_shortest_lead():
+    """Climatology winning at 240h+ is legitimate; at 0-1h it is leakage.
+
+    The MAE values matter: with climatology at 1.0 in the long bucket the
+    old cross-bucket `min()` comparison also returned "ok", so this test
+    passed against the very bug it is named for. 0.5 discriminates.
+    """
+    board = _baseline_board(shortest_mae=(2.0, 1.0), longest_mae=(0.5, 3.0))
 
     panel = evaluation._baseline_panel("scores_hourly", board)
 
     assert panel is not None
-    assert panel.status == "ok"
+    assert panel.status == "ok", (
+        "climatology beating best_provider at a long lead is not leakage"
+    )
+
+
+def test_baseline_panel_flags_climatology_winning_at_the_shortest_lead():
+    """The condition the panel exists to catch must actually fire."""
+    board = _baseline_board(shortest_mae=(1.0, 2.0), longest_mae=(3.0, 1.0))
+
+    panel = evaluation._baseline_panel("scores_hourly", board)
+
+    assert panel is not None
+    assert panel.status == "amber"
 
 
 def test_zone_c_states_fold_arithmetic(tmp_path):
