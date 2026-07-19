@@ -185,8 +185,15 @@ def provider_age_hours(value: object) -> float | None:
 
 
 def provider_age_is_fresh(value: object, cap_hours: float) -> bool:
-    """Whether a provider age is finite and strictly inside the serving cap."""
-    return (hours := provider_age_hours(value)) is not None and hours < cap_hours
+    """Whether a provider age is a real age inside the serving cap.
+
+    Bounded below as well as above. An age is the gap between a fetch and the
+    snapshot that selected it, so a negative one is not fresher-than-fresh —
+    it means the fetch is stamped in the future, which is a clock or
+    provenance fault, and reporting it as healthy hides exactly that.
+    """
+    hours = provider_age_hours(value)
+    return hours is not None and 0.0 <= hours < cap_hours
 
 
 def obs_col(variable: str) -> str:

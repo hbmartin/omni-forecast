@@ -3,7 +3,7 @@
 import hashlib
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -58,6 +58,19 @@ def runs_path(config: Config) -> Path:
     return config.dataset.dir / "runs.parquet"
 
 
+def _as_utc(moment: datetime) -> datetime:
+    """A timezone-aware UTC instant.
+
+    A naive ``RunRecord`` timestamp used to lose the whole row: ``_to_frame``
+    silently reinterpreted it as UTC, then ``prune_runs`` raised SchemaError
+    comparing a tz-aware column against a tz-naive literal, and ``append_run``
+    swallowed that — so the ledger was never written and nothing said so.
+    """
+    return (
+        moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+    )
+
+
 def prune_runs(frame: pl.DataFrame, *, now: datetime) -> pl.DataFrame:
     """Bound the ledger by age, then by row count as a burst backstop.
 
@@ -67,7 +80,7 @@ def prune_runs(frame: pl.DataFrame, *, now: datetime) -> pl.DataFrame:
     """
     if frame.is_empty():
         return frame
-    horizon = now - timedelta(days=_RETENTION_DAYS)
+    horizon = _as_utc(now) - timedelta(days=_RETENTION_DAYS)
     return frame.filter(
         pl.col("started_at").is_null() | (pl.col("started_at") >= horizon)
     ).tail(_MAX_ROWS)
@@ -114,8 +127,8 @@ def _to_frame(record: RunRecord) -> pl.DataFrame:
         "run_id": record.run_id,
         "command": record.command,
         "args_json": record.args_json,
-        "started_at": record.started_at,
-        "ended_at": record.ended_at,
+        "started_at": _as_utc(record.started_at),
+        "ended_at": _as_utc(record.ended_at),
         "duration_ms": duration_ms,
         "exit_code": record.exit_code,
         "error": record.error,

@@ -691,3 +691,26 @@ def test_truth_thinning_is_not_evaluable_without_recent_truth(tmp_path):
 
     assert alert.severity == "info"
     assert "trailing 7 days" in alert.message
+
+
+def test_unreadable_artifacts_are_named_not_shown_as_absent(tmp_path):
+    """Every loader falls back to "absent" on failure.
+
+    That is right for a young archive and wrong for a corrupt or
+    permission-denied file: the dashboard rendered "not yet" over a broken
+    deployment. The alert names them instead.
+    """
+    alerts = by_panel(
+        evaluate_alerts(
+            make_inputs(tmp_path, unreadable_artifacts=("truth_hourly.parquet",))
+        ),
+        "unreadable-artifacts",
+    )
+
+    assert len(alerts) == 1
+    assert alerts[0].severity == "red"
+    assert "truth_hourly.parquet" in alerts[0].message
+
+
+def test_no_unreadable_alert_when_everything_loads(tmp_path):
+    assert not by_panel(evaluate_alerts(make_inputs(tmp_path)), "unreadable-artifacts")

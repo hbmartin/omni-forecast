@@ -70,6 +70,7 @@ class AlertInputs:
     releases: tuple[Mapping[str, object], ...] = ()
     observability_history: pl.DataFrame = field(default_factory=pl.DataFrame)
     archive_location: tuple[float, float] | None = None
+    unreadable_artifacts: tuple[str, ...] = ()
 
 
 def _not_evaluable(zone: str, panel_id: str, message: str, threshold: str) -> Alert:
@@ -776,6 +777,30 @@ def _silent_empty_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
     return tuple(alerts)
 
 
+def _unreadable_artifact_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
+    """Artifacts that exist on disk but could not be read.
+
+    Every loader falls back to "absent" on failure, which is right for a young
+    archive and wrong for a corrupt or permission-denied file: the dashboard
+    would render "not yet" over a broken deployment. Name them instead.
+    """
+    if not inputs.unreadable_artifacts:
+        return ()
+    return (
+        Alert(
+            severity="red",
+            zone="G",
+            panel_id="unreadable-artifacts",
+            message=(
+                "artifacts exist but could not be read: "
+                f"{', '.join(inputs.unreadable_artifacts)}; the panels that "
+                "depend on them are showing absence, not health"
+            ),
+            threshold="any artifact present on disk must be readable",
+        ),
+    )
+
+
 def evaluate_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
     """Every alert family, most severe first; evaluable ones before info."""
     alerts = (
@@ -792,6 +817,7 @@ def evaluate_alerts(inputs: AlertInputs) -> tuple[Alert, ...]:
         *_divergence_alerts(inputs),
         *_serving_alerts(inputs),
         *_lineage_alerts(inputs),
+        *_unreadable_artifact_alerts(inputs),
     )
     return tuple(
         sorted(

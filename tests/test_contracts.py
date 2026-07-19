@@ -244,3 +244,18 @@ class TestFiniteNumber:
         from grounded_weather_forecast.contracts import finite_number
 
         assert finite_number(value) == expected
+
+
+def test_a_negative_provider_age_is_not_fresh():
+    """An age is a gap between a fetch and the snapshot that selected it.
+
+    A negative one means the fetch is stamped in the future -- a clock or
+    provenance fault -- and reporting it as fresh hides exactly that.
+    """
+    from grounded_weather_forecast.contracts import provider_age_is_fresh
+
+    assert provider_age_is_fresh(0.0, 12.0)
+    assert provider_age_is_fresh(11.9, 12.0)
+    assert not provider_age_is_fresh(12.0, 12.0)
+    assert not provider_age_is_fresh(-1.0, 12.0)
+    assert not provider_age_is_fresh(-1e6, 12.0)
