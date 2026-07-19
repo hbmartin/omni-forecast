@@ -259,3 +259,72 @@ def test_observability_state_drops_replay_cursors():
     assert "buckets" in state
     assert "grounding" in state
     assert state["sources"] == list(train.x.sources)
+
+
+class TestStateIntegrity:
+    """`advance` raises as a documented signal, so it must not half-mutate."""
+
+    def _fitted(self):
+        matrix = synthetic_hourly_matrix(days=6, max_lead=48, seed=11)
+        train = to_supervised_slice(matrix, TEMP)
+        return matrix, OnlineExperts(method_id="ewa", scheme="ewa").fit(train)
+
+    def test_a_failed_advance_leaves_state_untouched(self):
+        """Regression: a late bucket's raise left earlier buckets advanced.
+
+        `_replay` walked buckets in sorted order, mutating `_states`,
+        `_progress`, `_sources` and the grounding as it went, so a digest
+        mismatch on the last bucket left the object in a state that was
+        neither the old one nor a valid new one.
+        """
+        matrix, experts = self._fitted()
+        before = json.dumps(experts.to_state(), sort_keys=True)
+        # Corrupt a row in the lexicographically LAST bucket, so every earlier
+        # bucket has already been advanced by the time the raise happens.
+        last_bucket = sorted(experts.to_state()["buckets"])[-1]
+        corrupted = matrix.with_columns(
+            pl.when(pl.col("lead_bucket") == last_bucket)
+            .then(pl.col("fx__alpha__temp_c") + 5.0)
+            .otherwise(pl.col("fx__alpha__temp_c"))
+            .alias("fx__alpha__temp_c")
+        )
+
+        with pytest.raises(ValueError, match="history changed"):
+            experts.advance(to_supervised_slice(corrupted, TEMP))
+
+        assert json.dumps(experts.to_state(), sort_keys=True) == before
+
+    def test_a_vanished_bucket_reports_retention_loss(self):
+        """The message for this case used to claim the history had changed."""
+        matrix, experts = self._fitted()
+        # Drop the short-lead buckets while preserving max(resolution), so the
+        # causal guard in `advance` does not pre-empt the bucket check.
+        thinned = matrix.filter(pl.col("lead_hours") > 6)
+
+        with pytest.raises(ValueError, match="vanished"):
+            experts.advance(to_supervised_slice(thinned, TEMP))
+
+    def test_from_state_rejects_a_mismatched_weight_vector(self):
+        """Wrong arity used to surface as an IndexError deep inside `_step`."""
+        _, experts = self._fitted()
+        state = experts.to_state()
+        label = next(iter(state["buckets"]))
+        state["buckets"][label]["weights"] = [1.0]
+
+        with pytest.raises(ValueError, match="weights"):
+            OnlineExperts.from_state(state, "ewa")
+
+    def test_from_state_rejects_state_without_sources(self):
+        _, experts = self._fitted()
+        state = experts.to_state()
+        state["sources"] = []
+
+        with pytest.raises(ValueError, match="no sources"):
+            OnlineExperts.from_state(state, "ewa")
+
+    def test_observability_state_still_drops_only_the_cursors(self):
+        """The dashboard view must survive the atomicity rework."""
+        _, experts = self._fitted()
+        state = experts.observability_state()
+        assert "progress" not in state
+        assert "buckets" in state
