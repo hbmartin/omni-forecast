@@ -122,3 +122,64 @@ class TestArtifactStore:
                 state={},
                 meta={"dataset_fingerprint": "forged"},
             )
+
+
+class TestConcurrentSaves:
+    """`predict` runs every 10 minutes over several variables, so concurrent
+    saves into one store are the normal case."""
+
+    def test_parallel_saves_keep_every_pointer_entry(self, tmp_path):
+        """Regression: the pointer's read-modify-write was unlocked.
+
+        Interleaved saves lost entries outright and could leave latest.json
+        unparseable, which a later reclamation pass would read as "nothing is
+        referenced" -- deleting every state tree.
+        """
+        import json
+        from concurrent.futures import ThreadPoolExecutor
+
+        from grounded_weather_forecast.artifacts import ArtifactStore
+
+        store = ArtifactStore(tmp_path / "state")
+        methods = [f"m{index}" for index in range(24)]
+
+        def save(method_id: str) -> None:
+            store.save(
+                fingerprint="fp",
+                method_id=method_id,
+                product="hourly",
+                variable="temp_c",
+                state={"method": method_id},
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(save, methods))
+
+        latest = json.loads((tmp_path / "state" / "latest.json").read_text())
+        assert set(latest) == {f"hourly.temp_c.{method}" for method in methods}
+        for method_id in methods:
+            assert store.load_state(
+                fingerprint="fp",
+                method_id=method_id,
+                product="hourly",
+                variable="temp_c",
+            ) == {"method": method_id}
+
+    def test_a_corrupt_pointer_is_an_error_not_an_empty_map(self, tmp_path):
+        """Reading it as empty would let reclamation delete every state tree."""
+        import pytest
+
+        from grounded_weather_forecast.artifacts import ArtifactError, ArtifactStore
+
+        store = ArtifactStore(tmp_path / "state")
+        store.save(
+            fingerprint="fp",
+            method_id="ewa",
+            product="hourly",
+            variable="temp_c",
+            state={},
+        )
+        (tmp_path / "state" / "latest.json").write_text("{not json", encoding="utf-8")
+
+        with pytest.raises(ArtifactError, match="corrupt artifact pointer"):
+            store.read_latest()

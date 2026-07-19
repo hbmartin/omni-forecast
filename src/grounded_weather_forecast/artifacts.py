@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from grounded_weather_forecast.storage import atomic_write_text, locked_path
+
 
 class ArtifactError(ValueError):
     """A requested artifact is missing or inconsistent."""
@@ -46,8 +48,6 @@ class ArtifactStore:
         if overlap := _RESERVED_MANIFEST_KEYS.intersection(meta or {}):
             msg = f"artifact metadata may not override reserved keys: {sorted(overlap)}"
             raise ArtifactError(msg)
-        slot.mkdir(parents=True, exist_ok=True)
-        (slot / "state.json").write_text(json.dumps(state), encoding="utf-8")
         manifest = {
             "method_id": method_id,
             "product": product,
@@ -56,10 +56,15 @@ class ArtifactStore:
             "created_at": datetime.now(tz=UTC).isoformat(),
             **(meta or {}),
         }
-        (slot / "manifest.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
-        self._update_latest(fingerprint, method_id, product, variable)
+        # One transaction: the slot must exist before the pointer names it, and
+        # the pointer's read-modify-write cannot interleave with another serve.
+        # `predict` runs every 10 minutes over several variables, so concurrent
+        # saves into one store are the normal case, not an edge case.
+        with locked_path(self._latest_path()):
+            slot.mkdir(parents=True, exist_ok=True)
+            atomic_write_text(json.dumps(state), slot / "state.json")
+            atomic_write_text(json.dumps(manifest, indent=2), slot / "manifest.json")
+            self._update_latest(fingerprint, method_id, product, variable)
         return slot
 
     @staticmethod
@@ -126,15 +131,29 @@ class ArtifactStore:
         return self.root / "latest.json"
 
     def read_latest(self) -> dict[str, dict[str, str]]:
+        """The pointer map, or an ArtifactError if it exists but cannot be read.
+
+        A missing pointer is a cold start and reads as empty. A corrupt or
+        unreadable one is not: returning ``{}`` there would let a reclamation
+        pass conclude that nothing is referenced and delete every state tree.
+        """
         path = self._latest_path()
         if not path.exists():
             return {}
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            msg = f"corrupt artifact pointer at {path}"
+            raise ArtifactError(msg) from exc
+        except OSError as exc:
+            msg = f"unreadable artifact pointer at {path}"
+            raise ArtifactError(msg) from exc
         return loaded if isinstance(loaded, dict) else {}
 
     def _update_latest(
         self, fingerprint: str, method_id: str, product: str, variable: str
     ) -> None:
+        """Merge one pointer entry. Callers hold the lock on ``latest.json``."""
         latest = self.read_latest()
         latest[f"{product}.{variable}.{method_id}"] = {
             "fingerprint": fingerprint,
@@ -142,7 +161,6 @@ class ArtifactStore:
             "product": product,
             "variable": variable,
         }
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._latest_path().write_text(
-            json.dumps(latest, indent=2, sort_keys=True), encoding="utf-8"
+        atomic_write_text(
+            json.dumps(latest, indent=2, sort_keys=True), self._latest_path()
         )
