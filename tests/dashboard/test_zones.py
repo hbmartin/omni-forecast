@@ -8,8 +8,8 @@ from grounded_weather_forecast.dashboard.context import (
     collect_context,
 )
 from grounded_weather_forecast.dashboard.derive import Derived, derive
-from grounded_weather_forecast.dashboard.zones import ALL_ZONES
 from grounded_weather_forecast.dashboard.zones import (
+    ALL_ZONES,
     evaluation,
     liveness,
     readiness,

@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from check_lock_hosts import unapproved_hosts  # noqa: E402
+from check_lock_hosts import unapproved_hosts
 
 
 def test_lockfile_contains_only_approved_package_sources():

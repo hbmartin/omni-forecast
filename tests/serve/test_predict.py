@@ -704,3 +704,86 @@ class TestCoherenceLeavesValidDistributionsAlone:
             grid, [float(k) for k in sorted(temp_q, key=float)], sorted(temp_q.values())
         )
         assert np.all(dew <= temp + 1e-9), "dew point must not exceed temperature"
+
+
+class TestServingPathFitting:
+    """`_fit_methods` past its early returns: the warm-start path serving uses.
+
+    Every other test returns at the `no truth sources` / `n_rows == 0` guards,
+    so the artifact round trip, the stateful advance, and the observability
+    snapshot all shipped unexercised through this entry point.
+    """
+
+    def _slice_frames(self):
+        import polars as pl
+        from conftest import synthetic_hourly_matrix
+
+        matrix = synthetic_hourly_matrix(days=12, max_lead=12, seed=77)
+        return matrix, matrix.filter(pl.col("lead_hours") <= 6.0)
+
+    def _fit(self, config, method_ids, issue_time=NOW):
+        import numpy as np  # noqa: F401
+
+        from grounded_weather_forecast.contracts import TruthSemantics, hourly_variable
+        from grounded_weather_forecast.serve.predict import _fit_methods
+
+        train, predict_frame = self._slice_frames()
+        return _fit_methods(
+            train,
+            predict_frame,
+            hourly_variable("temp_c"),
+            method_ids,
+            daily=False,
+            semantics=TruthSemantics.INSTANTANEOUS,
+            config=config,
+            issue_time=issue_time,
+        )
+
+    def test_fits_and_predicts_each_requested_method(self, tmp_path):
+        config = write_config(tmp_path)
+        fitted = self._fit(config, {"equal_weight", "grounded_equal_weight"})
+
+        assert fitted is not None
+        results, x = fitted
+        assert set(results) == {"equal_weight", "grounded_equal_weight"}
+        for result in results.values():
+            assert result.point.shape[0] == x.n_rows
+
+    def test_a_stateful_method_persists_and_warm_starts(self, tmp_path):
+        """Second serve must load the artifact and advance it, not refit."""
+        config = write_config(tmp_path)
+
+        import numpy as np
+
+        first = self._fit(config, {"ewa"})
+        assert first is not None
+        state_dir = config.artifacts_dir / "state"
+        assert list(state_dir.rglob("*.json")), "the serve path must persist state"
+
+        second = self._fit(config, {"ewa"}, issue_time=NOW + timedelta(minutes=10))
+        assert second is not None
+        # Same evidence replayed: the warm start must land where the first did.
+        np.testing.assert_allclose(
+            second[0]["ewa"].point, first[0]["ewa"].point, atol=1e-9
+        )
+
+    def test_a_corrupt_artifact_falls_back_to_a_full_refit(self, tmp_path):
+        """The digest guard's whole point: never silently combine histories."""
+        config = write_config(tmp_path)
+        assert self._fit(config, {"ewa"}) is not None
+        for path in (config.artifacts_dir / "state").rglob("*.json"):
+            path.write_text('{"schema_version": 1}', encoding="utf-8")
+
+        import numpy as np
+
+        refitted = self._fit(config, {"ewa"})
+
+        assert refitted is not None
+        assert np.isfinite(refitted[0]["ewa"].point).any()
+
+    def test_observability_is_snapshotted_through_the_serving_path(self, tmp_path):
+        config = write_config(tmp_path)
+        assert self._fit(config, {"ewa"}) is not None
+        assert list((config.artifacts_dir / "observability").rglob("*.json")), (
+            "the dashboard's only serving-path hook must actually fire"
+        )

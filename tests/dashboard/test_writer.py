@@ -7,8 +7,8 @@ from grounded_weather_forecast.backtest.engine import BacktestRequest, run_backt
 from grounded_weather_forecast.backtest.scores import scores_path, write_scores
 from grounded_weather_forecast.contracts import (
     age_col,
-    fxd_col,
     fx_col,
+    fxd_col,
     hourly_variable,
 )
 from grounded_weather_forecast.dashboard import write_dashboard

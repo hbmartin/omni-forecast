@@ -6,8 +6,8 @@ import polars as pl
 import pytest
 from conftest import make_station_db, write_config
 
-from grounded_weather_forecast import cli as cli_module
 from grounded_weather_forecast import __version__
+from grounded_weather_forecast import cli as cli_module
 from grounded_weather_forecast.cli import build_parser, main
 from grounded_weather_forecast.dataset.neighbors import NeighborChecks
 from grounded_weather_forecast.runs import load_runs

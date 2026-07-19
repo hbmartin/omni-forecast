@@ -4,8 +4,8 @@ import pytest
 from conftest import make_forecast_db, utc, write_config
 
 from grounded_weather_forecast.dataset.providers import (
-    read_forecast_archive,
     read_daily_long,
+    read_forecast_archive,
     read_hourly_long,
     read_latest_archive_location,
     read_minutely_long,

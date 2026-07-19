@@ -125,10 +125,11 @@ class TestSnapshotsNeverAffectServing:
             raise RuntimeError("booster is unusable")
 
     def test_a_failing_blender_does_not_propagate(self, tmp_path):
+        from conftest import write_config
+
         from grounded_weather_forecast.serve.observability import (
             snapshot_observability,
         )
-        from conftest import write_config
 
         config = write_config(tmp_path)
         snapshot_observability(
@@ -142,11 +143,11 @@ class TestSnapshotsNeverAffectServing:
 
     def test_keyboard_interrupt_still_propagates(self, tmp_path):
         import pytest
+        from conftest import write_config
 
         from grounded_weather_forecast.serve.observability import (
             snapshot_observability,
         )
-        from conftest import write_config
 
         class Interrupting:
             method_id = "gbm"

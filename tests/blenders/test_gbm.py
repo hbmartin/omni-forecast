@@ -10,7 +10,10 @@ from grounded_weather_forecast.metrics.deterministic import mae
 
 lightgbm = pytest.importorskip("lightgbm")
 
-from grounded_weather_forecast.blenders.gbm import GbmStacker, build_features  # noqa: E402
+from grounded_weather_forecast.blenders.gbm import (  # noqa: E402
+    GbmStacker,
+    build_features,
+)
 
 TEMP = hourly_variable("temp_c")
 

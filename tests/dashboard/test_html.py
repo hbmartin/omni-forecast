@@ -70,7 +70,7 @@ def test_payload_round_trips_and_neutralizes_script_close():
     match = re.search(
         r'<script id="dashboard-data" type="application/json">(.*?)</script>',
         page,
-        re.S,
+        re.DOTALL,
     )
     assert match is not None
     raw = match.group(1)
