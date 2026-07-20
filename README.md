@@ -119,10 +119,10 @@ grounded-weather-forecast truth-qc                      # --days 30
 grounded-weather-forecast report
 
 # 8. Emit the current blended forecast (minutely + hourly + daily) as JSON.
-#    Schema version 3 carries ready/degraded status plus per-variable release
-#    identity, and is appended atomically to a history so it can later be scored
-#    against the truth that arrives — backtest skill is an estimate, this is the
-#    measurement.
+#    Schema version 4 carries ready/degraded status plus per-variable release
+#    identity and truth semantics. It is appended atomically to a history so
+#    each row is later scored against the same truth target used to select and
+#    fit it — backtest skill is an estimate, this is the measurement.
 grounded-weather-forecast predict                      # to stdout
 grounded-weather-forecast predict --out forecast.json
 #   --method auto|<id>   --now <iso>   --no-history   --semantics ...
@@ -146,8 +146,10 @@ never affect serving.
 Backtest evidence records the package version plus a digest of the installed
 first-party Python sources. The live demotion gate pools recent served rows only
 when configuration, method, implementation identity, provider source set, and
-per-variable truth semantics all match; a changed ensemble or implementation
-cannot inherit an incompatible verdict.
+the exact serving feature schema and per-variable truth semantics all match.
+`predict --semantics` selects matching evaluation evidence and records the
+actual target on every hourly row; a changed ensemble, truth target, or
+implementation cannot inherit an incompatible verdict.
 
 ## Status
 

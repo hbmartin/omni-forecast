@@ -21,7 +21,7 @@ backfill modules.
 import os
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
@@ -175,7 +175,12 @@ def neighbor_consensus(neighbors: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def cross_check(truth_hourly: pl.DataFrame, consensus: pl.DataFrame) -> NeighborChecks:
+def cross_check(
+    truth_hourly: pl.DataFrame,
+    consensus: pl.DataFrame,
+    *,
+    as_of: datetime | None = None,
+) -> NeighborChecks:
     """Station-vs-consensus drift and decorrelation verdicts."""
     truth_columns = ["valid_hour", "t__temp_c__inst"]
     if "t__wind_speed_ms__inst" in truth_hourly.columns:
@@ -229,7 +234,17 @@ def cross_check(truth_hourly: pl.DataFrame, consensus: pl.DataFrame) -> Neighbor
             min_samples=_MIN_CORRELATION_SAMPLES,
         ).alias("correlation")
     ).select("valid_hour", "correlation")
-    correlation_window = joined.tail(_CORRELATION_WINDOW_HOURS)
+    reference_time = as_of or truth_hourly.select(pl.col("valid_hour").max()).item()
+    if not isinstance(reference_time, datetime):  # pragma: no cover - joined proves it
+        msg = "truth valid_hour must contain datetimes"
+        raise NeighborError(msg)
+    correlation_window = joined.filter(
+        pl.col("valid_hour").is_between(
+            reference_time - timedelta(hours=_CORRELATION_WINDOW_HOURS),
+            reference_time,
+            closed="right",
+        )
+    )
     finite_pairs = correlation_window.filter(
         pl.col("t__temp_c__inst").is_not_null()
         & pl.col("consensus_c").is_not_null()
@@ -298,7 +313,6 @@ def fetch_neighbor_checks(
     now: datetime | None = None,
 ) -> NeighborChecks:
     """One cron pass: fetch, adjust, consense, verdict."""
-    del now  # reserved for future request shaping; keeps call sites stable
     payload = dict(fetcher(build_neighbors_url(config, hours)))
     neighbors = parse_neighbors(
         payload,
@@ -306,7 +320,11 @@ def fetch_neighbor_checks(
         config.truth_qc.elevation_band_m,
         config.truth_qc.lapse_k_per_km,
     )
-    checks = cross_check(truth_hourly, neighbor_consensus(neighbors))
+    checks = cross_check(
+        truth_hourly,
+        neighbor_consensus(neighbors),
+        as_of=now or datetime.now(tz=UTC),
+    )
     n_neighbors = int(neighbors["stid"].n_unique()) if not neighbors.is_empty() else 0
     return NeighborChecks(
         daily_drift=checks.daily_drift,

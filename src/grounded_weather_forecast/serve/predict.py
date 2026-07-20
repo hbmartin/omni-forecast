@@ -15,7 +15,7 @@ because it is the only genuinely minute-resolution signal they publish.
 import math
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import numpy as np
@@ -42,7 +42,6 @@ from grounded_weather_forecast.contracts import (
     SupervisedSlice,
     TruthSemantics,
     VariableSpec,
-    daily_variable,
     hourly_variable,
 )
 from grounded_weather_forecast.dataset.matrix import (
@@ -114,6 +113,7 @@ class VariableBlend:
     reasons: list[str]
     release_ids: list[str | None]
     quantiles: list[dict[str, float]]
+    truth_semantics: str = TruthSemantics.INSTANTANEOUS.value
 
 
 def _latest_observation(
@@ -229,7 +229,7 @@ def _stateful_blender(
         if not isinstance(fitted, OnlineExperts):  # pragma: no cover - registry gap
             return fitted
         blender = fitted
-    with suppress(OSError):
+    with suppress(ArtifactError, OSError):
         store.save(
             fingerprint=fingerprint,
             method_id=method_id,
@@ -410,6 +410,14 @@ def _blend_variable(
         daily=daily,
         force_method=force_method,
     )
+    chosen = [
+        _selection_for_semantics(
+            selection,
+            semantics,
+            explicit=force_method is not None or selection.pinned,
+        )
+        for selection in chosen
+    ]
     fitted = _fit_methods(
         train,
         predict_frame,
@@ -435,6 +443,7 @@ def _blend_variable(
             ],
             release_ids=[None] * predict_frame.height,
             quantiles=[{} for _ in range(predict_frame.height)],
+            truth_semantics=semantics.value,
         )
     results, _ = fitted
     point, quantiles = _blended_rows(results, chosen, predict_frame.height)
@@ -444,6 +453,37 @@ def _blend_variable(
         reasons=[selection.reason for selection in chosen],
         release_ids=[selection.release_id for selection in chosen],
         quantiles=quantiles,
+        truth_semantics=semantics.value,
+    )
+
+
+def _selection_for_semantics(
+    selection: Selection,
+    semantics: TruthSemantics,
+    *,
+    explicit: bool,
+) -> Selection:
+    """Prevent release provenance from crossing truth-target identities."""
+    if selection.release_id is None or selection.truth_semantics == semantics.value:
+        return selection
+    if selection.truth_semantics is None or explicit:
+        return replace(
+            selection,
+            reason=(
+                f"{selection.reason}; release evidence is not for "
+                f"{semantics.value} truth semantics"
+            ),
+            release_id=None,
+            truth_semantics=semantics.value,
+        )
+    return Selection(
+        "equal_weight",
+        reason=(
+            "degraded stale selection: release was evaluated with "
+            f"{selection.truth_semantics} truth, requested {semantics.value}"
+        ),
+        degraded=True,
+        truth_semantics=semantics.value,
     )
 
 
@@ -687,6 +727,9 @@ def _point_fields(
             name: release
             for name, result in blended.items()
             if (release := result.release_ids[index]) is not None
+        },
+        "truth_semantics": {
+            name: result.truth_semantics for name, result in blended.items()
         },
     }
 
@@ -991,27 +1034,17 @@ def _training_matrix(
     )
 
 
-def _supported_release_ids(selections: SelectionMap) -> list[str]:
-    release_ids: set[str] = set()
-    for (product_name, variable_name, _), selection in selections.items():
-        try:
-            product = Product(product_name)
-            variable = (
-                daily_variable(variable_name)
-                if product is Product.DAILY
-                else hourly_variable(variable_name)
-            )
-        except (KeyError, ValueError):
-            continue
-        try:
-            get_factory(selection.method_id)
-        except UnknownMethodError:
-            continue
-        if selection.release_id is not None and supports_product(
-            selection.method_id, product, variable
-        ):
-            release_ids.add(selection.release_id)
-    return sorted(release_ids)
+def _served_release_ids(
+    hourly: list[HourlyPoint], daily: list[DailyPoint]
+) -> list[str]:
+    """Release ids present on predictions that were actually emitted."""
+    return sorted(
+        {
+            release_id
+            for point in (*hourly, *daily)
+            for release_id in point.release_ids.values()
+        }
+    )
 
 
 def predict(
@@ -1042,7 +1075,7 @@ def predict(
         if not snapshot.daily.is_empty()
         else []
     )
-    release_ids = _supported_release_ids(selections)
+    release_ids = _served_release_ids(hourly, daily)
     degraded = not release_ids and force_method is None
     status_reason = (
         no_evidence_reason(config, config.dataset.dir / "scores") if degraded else None

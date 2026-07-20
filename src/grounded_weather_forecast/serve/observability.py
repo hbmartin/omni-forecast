@@ -203,48 +203,51 @@ def load_observability_states_with_failures(
 ) -> tuple[tuple[ObservabilitySnapshot, ...], tuple[Path, ...]]:
     """Latest snapshots plus paths for current entries that could not be read."""
     store = ArtifactStore(artifacts_dir / "observability")
+    if not store.root.exists():
+        return (), ()
     failures: list[Path] = []
+    snapshots: list[ObservabilitySnapshot] = []
     try:
-        latest = store.read_latest()
+        # Every entry shares one pointer lock. Acquiring it separately per slot
+        # turns a five-second timeout into N * five seconds and reports normal
+        # writer contention as N corrupt artifacts. A contended dashboard read
+        # is transient telemetry absence, not evidence that files are damaged.
+        with locked_path(store.latest_path, timeout=_LOCK_TIMEOUT_SECONDS):
+            latest = store.read_latest()
+            for _key, pointer in sorted(latest.items()):
+                identity = {
+                    "fingerprint": pointer["fingerprint"],
+                    "method_id": pointer["method_id"],
+                    "product": pointer["product"],
+                    "variable": pointer["variable"],
+                }
+                try:
+                    state = store.load_state(**identity)
+                    manifest = store.load_manifest(**identity)
+                except (ArtifactError, OSError, TypeError, ValueError):
+                    failures.append(
+                        artifacts_dir
+                        / "observability"
+                        / pointer["fingerprint"]
+                        / pointer["method_id"]
+                        / f"{pointer['product']}.{pointer['variable']}"
+                    )
+                    continue
+                issue = manifest.get("issue_time")
+                snapshots.append(
+                    ObservabilitySnapshot(
+                        method_id=identity["method_id"],
+                        product=identity["product"],
+                        variable=identity["variable"],
+                        dataset_fingerprint=identity["fingerprint"],
+                        created_at=str(manifest.get("created_at", "")),
+                        issue_time=str(issue) if issue is not None else None,
+                        state=state,
+                    )
+                )
+    except Timeout:
+        return (), ()
     except (ArtifactError, OSError, json.JSONDecodeError):
         pointer_path = artifacts_dir / "observability" / "latest.json"
         return (), (pointer_path,)
-    snapshots: list[ObservabilitySnapshot] = []
-    for _key, pointer in sorted(latest.items()):
-        try:
-            identity = {
-                "method_id": str(pointer["method_id"]),
-                "product": str(pointer["product"]),
-                "variable": str(pointer["variable"]),
-            }
-            fingerprint, state, manifest = store.load_latest_bundle(
-                **identity, lock_timeout=_LOCK_TIMEOUT_SECONDS
-            )
-        except (ArtifactError, KeyError, OSError, Timeout, TypeError, ValueError):
-            if isinstance(pointer, dict) and all(
-                isinstance(pointer.get(field), str)
-                for field in ("fingerprint", "method_id", "product", "variable")
-            ):
-                failures.append(
-                    artifacts_dir
-                    / "observability"
-                    / str(pointer["fingerprint"])
-                    / str(pointer["method_id"])
-                    / f"{pointer['product']}.{pointer['variable']}"
-                )
-            else:
-                failures.append(artifacts_dir / "observability" / "latest.json")
-            continue
-        issue = manifest.get("issue_time")
-        snapshots.append(
-            ObservabilitySnapshot(
-                method_id=identity["method_id"],
-                product=identity["product"],
-                variable=identity["variable"],
-                dataset_fingerprint=fingerprint,
-                created_at=str(manifest.get("created_at", "")),
-                issue_time=str(issue) if issue is not None else None,
-                state=state,
-            )
-        )
     return tuple(snapshots), tuple(failures)

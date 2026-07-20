@@ -14,6 +14,7 @@ from grounded_weather_forecast.serve.observability import (
     OBSERVABILITY_HISTORY_SCHEMA,
     load_observability_history,
     load_observability_states,
+    load_observability_states_with_failures,
     observability_root,
     snapshot_observability,
 )
@@ -129,6 +130,34 @@ def test_snapshot_lock_timeout_is_swallowed_promptly(tmp_path, monkeypatch):
 
     assert elapsed < 1.0
     assert load_observability_states(config.artifacts_dir) == ()
+
+
+def test_reader_uses_one_timeout_for_the_shared_pointer_lock(tmp_path, monkeypatch):
+    import grounded_weather_forecast.serve.observability as observability
+
+    config = write_config(tmp_path)
+    store = ArtifactStore(observability_root(config))
+    for index in range(4):
+        store.save(
+            fingerprint="fp",
+            method_id=f"method-{index}",
+            product="hourly",
+            variable="temp_c",
+            state={"index": index},
+        )
+    monkeypatch.setattr(observability, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    lock_path = store._latest_path().with_suffix(".json.lock")
+
+    with FileLock(lock_path):
+        started = monotonic()
+        snapshots, failures = load_observability_states_with_failures(
+            config.artifacts_dir
+        )
+        elapsed = monotonic() - started
+
+    assert elapsed < 0.15, "one shared lock may consume only one timeout"
+    assert snapshots == ()
+    assert failures == (), "lock contention is not artifact corruption"
 
 
 class TestSnapshotsNeverAffectServing:

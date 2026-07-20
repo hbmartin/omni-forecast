@@ -536,8 +536,18 @@ def _cmd_predict(config: Config, args: argparse.Namespace) -> int:
     now = args.now
     if now is not None and now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
+    semantics = _semantics_by_variable(
+        config,
+        args.semantics,
+        tuple(variable.name for variable in HOURLY_VARIABLES),
+    )
     selections = (
-        select_methods(config, config.dataset.dir / "scores", as_of=now)
+        select_methods(
+            config,
+            config.dataset.dir / "scores",
+            as_of=now,
+            semantics=semantics,
+        )
         if not forced
         else {}
     )
@@ -546,11 +556,7 @@ def _cmd_predict(config: Config, args: argparse.Namespace) -> int:
             config,
             selections,
             now=now,
-            semantics=_semantics_by_variable(
-                config,
-                args.semantics,
-                tuple(variable.name for variable in HOURLY_VARIABLES),
-            ),
+            semantics=semantics,
             force_method=forced,
         )
     except (NoForecastDataError, UnsupportedMethodError) as exc:
@@ -595,6 +601,11 @@ def _cmd_backtest(config: Config, args: argparse.Namespace) -> int:
 
     methods = available_methods() if args.methods == "all" else _split_csv(args.methods)
     products = _split_csv(args.products)
+    promotion_semantics = _semantics_by_variable(
+        config,
+        args.semantics,
+        tuple(variable.name for variable in HOURLY_VARIABLES),
+    )
     total = 0
     for product in products:
         daily = product == "daily"
@@ -643,7 +654,11 @@ def _cmd_backtest(config: Config, args: argparse.Namespace) -> int:
             select_methods,
         )
 
-        promoted = select_methods(config, config.dataset.dir / "scores")
+        promoted = select_methods(
+            config,
+            config.dataset.dir / "scores",
+            semantics=promotion_semantics,
+        )
         release_ids = sorted(
             {
                 choice.release_id

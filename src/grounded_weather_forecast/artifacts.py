@@ -137,10 +137,13 @@ class ArtifactStore:
         advancing, so a new dataset fingerprint does not by itself force a
         replay. The pointer identity is checked before it is trusted.
         """
-        fingerprint, state, _manifest = self.load_latest_bundle(
-            method_id=method_id, product=product, variable=variable
-        )
-        return fingerprint, state
+        with locked_path(self._latest_path()):
+            identity = self._latest_identity(
+                method_id=method_id,
+                product=product,
+                variable=variable,
+            )
+            return identity["fingerprint"], self.load_state(**identity)
 
     def load_latest_bundle(
         self,
@@ -151,38 +154,40 @@ class ArtifactStore:
         lock_timeout: float = -1,
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         """Load one current state and manifest while reclamation is excluded."""
-        key = f"{product}.{variable}.{method_id}"
         with locked_path(self._latest_path(), timeout=lock_timeout):
-            pointer = self.read_latest().get(key)
-            if not isinstance(pointer, dict):
-                msg = f"no latest artifact for {key}"
-                raise ArtifactError(msg)
-            expected = {
-                "method_id": method_id,
-                "product": product,
-                "variable": variable,
-            }
-            if any(pointer.get(name) != value for name, value in expected.items()):
-                msg = f"inconsistent latest artifact pointer for {key}"
-                raise ArtifactError(msg)
-            fingerprint = pointer.get("fingerprint")
-            if not isinstance(fingerprint, str) or not fingerprint:
-                msg = f"latest artifact pointer for {key} has no fingerprint"
-                raise ArtifactError(msg)
-            identity = {
-                "fingerprint": fingerprint,
-                "method_id": method_id,
-                "product": product,
-                "variable": variable,
-            }
+            identity = self._latest_identity(
+                method_id=method_id,
+                product=product,
+                variable=variable,
+            )
             return (
-                fingerprint,
+                identity["fingerprint"],
                 self.load_state(**identity),
                 self.load_manifest(**identity),
             )
 
+    def _latest_identity(
+        self, *, method_id: str, product: str, variable: str
+    ) -> dict[str, str]:
+        """Validated slot identity for one latest-pointer key.
+
+        Callers hold the pointer lock until every file they need from the slot
+        has loaded, so reclamation cannot remove the selected fingerprint.
+        """
+        key = f"{product}.{variable}.{method_id}"
+        pointer = self.read_latest().get(key)
+        if pointer is None:
+            msg = f"no latest artifact for {key}"
+            raise ArtifactError(msg)
+        return dict(pointer)
+
     def _latest_path(self) -> Path:
         return self.root / "latest.json"
+
+    @property
+    def latest_path(self) -> Path:
+        """Path to the shared latest-pointer document."""
+        return self._latest_path()
 
     def read_latest(self) -> dict[str, dict[str, str]]:
         """The pointer map, or an ArtifactError if it exists but cannot be read.
@@ -205,7 +210,27 @@ class ArtifactStore:
         if not isinstance(loaded, dict):
             msg = f"corrupt artifact pointer at {path}"
             raise ArtifactError(msg)
-        return loaded
+        validated: dict[str, dict[str, str]] = {}
+        required = ("fingerprint", "method_id", "product", "variable")
+        for raw_key, raw_pointer in loaded.items():
+            if not isinstance(raw_key, str) or not isinstance(raw_pointer, dict):
+                msg = f"corrupt artifact pointer at {path}"
+                raise ArtifactError(msg)
+            pointer: dict[str, str] = {}
+            for field in required:
+                value = raw_pointer.get(field)
+                if not isinstance(value, str) or not value:
+                    msg = f"corrupt artifact pointer at {path}"
+                    raise ArtifactError(msg)
+                pointer[field] = value
+            expected_key = (
+                f"{pointer['product']}.{pointer['variable']}.{pointer['method_id']}"
+            )
+            if raw_key != expected_key:
+                msg = f"inconsistent artifact pointer key at {path}"
+                raise ArtifactError(msg)
+            validated[raw_key] = pointer
+        return validated
 
     def _update_latest(
         self,

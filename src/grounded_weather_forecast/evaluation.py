@@ -57,6 +57,7 @@ class EvaluationRun:
     dataset_fingerprint: str
     source_kind: str
     source_set: tuple[str, ...]
+    feature_set: tuple[str, ...]
     product: str
     window: str
     semantics: dict[str, str]
@@ -71,6 +72,7 @@ class EvaluationRun:
         *,
         source_kind: str,
         source_set: tuple[str, ...],
+        feature_set: tuple[str, ...],
         product: str,
         window: str,
         semantics: dict[str, TruthSemantics],
@@ -80,6 +82,7 @@ class EvaluationRun:
             "dataset_fingerprint": dataset_fingerprint(config),
             "source_kind": source_kind,
             "source_set": list(source_set),
+            "feature_set": list(feature_set),
             "product": product,
             "window": window,
             "semantics": {key: value.value for key, value in sorted(semantics.items())},
@@ -94,6 +97,7 @@ class EvaluationRun:
             dataset_fingerprint=str(stable["dataset_fingerprint"]),
             source_kind=source_kind,
             source_set=source_set,
+            feature_set=feature_set,
             product=product,
             window=window,
             semantics={key: value.value for key, value in semantics.items()},

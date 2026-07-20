@@ -1,3 +1,5 @@
+import json
+
 import polars as pl
 import pytest
 from conftest import synthetic_hourly_matrix, write_config
@@ -48,10 +50,26 @@ class TestRunBacktest:
         assert scores["evaluation_id"].null_count() == 0
         assert scores["dataset_fingerprint"].unique().to_list() == ["unknown"]
         assert scores["source_set_json"].unique().to_list() == ['["alpha", "beta"]']
+        feature_set = json.loads(scores["feature_set_json"][0])
+        assert "lead_bucket" in feature_set
+        assert not any(column.startswith(("fx__", "t__")) for column in feature_set)
         assert scores["semantics"].unique().to_list() == ["inst"]
         assert (scores["lead_hours"] > 0).all()
         # test rows strictly after each fold origin
         assert (scores["issue_time"] > scores["fold_origin"]).all()
+
+    def test_ensemble_features_are_part_of_evaluation_identity(self, config, matrix):
+        request = BacktestRequest(
+            variables=(hourly_variable("temp_c"),),
+            methods=("equal_weight",),
+        )
+        scores = run_backtest(
+            matrix.with_columns(pl.lit(1.5).alias("ens__temp_c__spread")),
+            request,
+            config,
+        )
+
+        assert "ens__temp_c__spread" in json.loads(scores["feature_set_json"][0])
 
     def test_empty_matrix(self, config):
         request = BacktestRequest(
