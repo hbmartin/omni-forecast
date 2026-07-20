@@ -169,6 +169,7 @@ def test_zone_f_selection_reason_shares(tmp_path):
                 "no backtest evidence for this slice",
                 "no backtest evidence for this slice",
             ],
+            "truth_semantics": ["inst", "inst"],
             "quantiles_json": [None, None],
         },
         schema=HISTORY_SCHEMA,
@@ -200,6 +201,7 @@ def _degraded_history(healthy: int, degraded: int) -> pl.DataFrame:
             "release_id": [None] * rows,
             "selection_reason": ["winner: emos"] * healthy
             + ["degraded: no evidence"] * degraded,
+            "truth_semantics": ["inst"] * rows,
             "quantiles_json": [None] * rows,
         },
         schema=HISTORY_SCHEMA,
@@ -292,6 +294,7 @@ def test_zone_f_reasons_use_total_frequency_then_name(tmp_path):
             "dataset_fingerprint": ["f"] * count,
             "release_id": [None] * count,
             "selection_reason": reasons,
+            "truth_semantics": ["inst"] * count,
             "quantiles_json": [None] * count,
         },
         schema=HISTORY_SCHEMA,
@@ -374,6 +377,7 @@ def _history_with_minutely(hourly_degraded: int, minutely: int) -> pl.DataFrame:
             "release_id": [None] * rows,
             "selection_reason": ["degraded: no evidence"] * hourly_degraded
             + [None] * minutely,
+            "truth_semantics": ["inst"] * rows,
             "quantiles_json": [None] * rows,
         },
         schema=HISTORY_SCHEMA,

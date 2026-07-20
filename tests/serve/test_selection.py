@@ -9,7 +9,7 @@ from grounded_weather_forecast.backtest.scores import (
     scores_path,
     write_scores,
 )
-from grounded_weather_forecast.contracts import hourly_variable
+from grounded_weather_forecast.contracts import TruthSemantics, hourly_variable
 from grounded_weather_forecast.serve.selection import (
     FALLBACK_METHOD,
     Selection,
@@ -263,6 +263,7 @@ def test_release_eligibility_uses_implementation_not_promotion_age(tmp_path):
         "evaluation_id": "eval-v1",
         "source_kind": "live",
         "source_set_json": json.dumps(["nws", "ecmwf"]),
+        "feature_set_json": json.dumps(["lead_bucket"]),
         "semantics": {"temp_c": "inst"},
         "window": "expanding",
         "code_version": "0.4.0+implementation-v1",
@@ -334,6 +335,7 @@ def test_release_eligibility_rejects_incompatible_evaluation_context(tmp_path):
                 "evaluation_id": "eval-old",
                 "source_kind": "live",
                 "source_set_json": json.dumps(["nws", "ecmwf"]),
+                "feature_set_json": json.dumps(["lead_bucket"]),
                 "semantics": {"temp_c": "inst"},
                 "code_version": "implementation",
             }
@@ -359,12 +361,19 @@ def test_release_eligibility_rejects_incompatible_evaluation_context(tmp_path):
         )
     }
 
-    def eligible(*, sources=("nws", "ecmwf"), semantic="inst", present=True):
+    def eligible(
+        *,
+        sources=("nws", "ecmwf"),
+        features=("lead_bucket",),
+        semantic="inst",
+        present=True,
+    ):
         contexts = (
             {
                 "evaluation_id": "eval-current",
                 "source_kind": "live",
                 "source_set_json": json.dumps(sources),
+                "feature_set_json": json.dumps(features),
                 "semantics": {"temp_c": semantic},
                 "code_version": "implementation",
             },
@@ -375,8 +384,51 @@ def test_release_eligibility_rejects_incompatible_evaluation_context(tmp_path):
 
     assert eligible() == frozenset({"release-old-context"})
     assert not eligible(sources=("nws", "gfs"))
+    assert not eligible(features=("lead_bucket", "ens__temp_c__spread"))
     assert not eligible(semantic="mean")
     assert not eligible(present=False)
+
+
+def test_selection_and_historical_replay_bind_requested_truth_semantics(tmp_path):
+    config = scored_config(tmp_path)
+    scores_dir = config.dataset.dir / "scores"
+    matrix = synthetic_hourly_matrix(days=25, biases={"alpha": 3.0})
+    mean_scores = run_backtest(
+        matrix,
+        BacktestRequest(
+            variables=(hourly_variable("temp_c"),),
+            methods=("equal_weight", "grounded_equal_weight", "best_provider"),
+            semantics=TruthSemantics.INTERVAL_MEAN,
+        ),
+        config,
+    )
+    write_scores(mean_scores, scores_dir / "scores_hourly_live_mean.parquet")
+
+    instantaneous = select_methods(
+        config,
+        scores_dir,
+        semantics={"temp_c": TruthSemantics.INSTANTANEOUS},
+    )
+    interval_mean = select_methods(
+        config,
+        scores_dir,
+        semantics={"temp_c": TruthSemantics.INTERVAL_MEAN},
+    )
+
+    assert {choice.truth_semantics for choice in instantaneous.values()} == {"inst"}
+    assert {choice.truth_semantics for choice in interval_mean.values()} == {"mean"}
+    assert {choice.release_id for choice in instantaneous.values()} != {
+        choice.release_id for choice in interval_mean.values()
+    }
+    restored = select_methods(
+        config,
+        scores_dir,
+        as_of=datetime.now(tz=UTC) + timedelta(minutes=1),
+        semantics={"temp_c": TruthSemantics.INSTANTANEOUS},
+    )
+    assert {choice.release_id for choice in restored.values()} == {
+        choice.release_id for choice in instantaneous.values()
+    }
 
 
 def test_historical_release_requires_current_implementation(tmp_path):
@@ -438,6 +490,7 @@ class TestNoEvidenceReason:
                 "evaluation_created_at": [issue],
                 "dataset_fingerprint": [dataset_fp],
                 "source_set_json": [_json.dumps(["nws"])],
+                "feature_set_json": [_json.dumps(["lead_bucket"])],
                 "semantics": ["inst"],
                 "code_version": ["test"],
                 "config_fingerprint": [config_fp],

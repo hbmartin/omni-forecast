@@ -31,6 +31,7 @@ _VERIFICATION_SCHEMA: pl.Schema = pl.Schema(
     {
         "product": pl.String,
         "variable": pl.String,
+        "truth_semantics": pl.String,
         "lead_bucket": pl.String,
         "method_id": pl.String,
         "dataset_fingerprint": pl.String,
@@ -43,13 +44,17 @@ _VERIFICATION_SCHEMA: pl.Schema = pl.Schema(
 )
 
 
-def _truth_column(variable: str) -> str:
+def _truth_column(variable: str, semantics: str) -> str | None:
+    try:
+        truth_semantics = TruthSemantics(semantics)
+    except ValueError:
+        return None
     try:
         spec = hourly_variable(variable)
     except KeyError:
         return truth_col(variable)
     if spec.has_dual_semantics:
-        return truth_col(variable, TruthSemantics.INSTANTANEOUS)
+        return truth_col(variable, truth_semantics)
     return truth_col(variable)
 
 
@@ -69,10 +74,13 @@ def verify_history(
     if issued_before is not None:
         history = history.filter(pl.col("issued_at") <= issued_before)
     history = history.with_columns(
+        pl.col("truth_semantics")
+        .fill_null(TruthSemantics.INSTANTANEOUS.value)
+        .alias("truth_semantics"),
         pl.when(pl.col("product") == "daily")
         .then(daily_bucket_expr(pl.col("lead_hours") / 24.0))
         .otherwise(hourly_bucket_expr(pl.col("lead_hours")))
-        .alias("lead_bucket")
+        .alias("lead_bucket"),
     )
     if history.is_empty():
         return pl.DataFrame(schema=_VERIFICATION_SCHEMA)
@@ -83,9 +91,9 @@ def verify_history(
         else pl.DataFrame()
     )
     for key, group in history.partition_by(
-        ["product", "variable"], as_dict=True
+        ["product", "variable", "truth_semantics"], as_dict=True
     ).items():
-        product, variable = (str(part) for part in key)
+        product, variable, truth_semantics = (str(part) for part in key)
         match product:
             case "minutely":
                 column = variable
@@ -110,9 +118,9 @@ def verify_history(
                 join_key = "valid_date"
             case _:
                 truth = hourly
-                column = _truth_column(variable)
+                column = _truth_column(variable, truth_semantics)
                 join_key = "valid_time"
-        if truth.is_empty() or column not in truth.columns:
+        if column is None or truth.is_empty() or column not in truth.columns:
             continue
         joined = group.join(
             truth.select(join_key, column), on=join_key, how="inner"
@@ -129,6 +137,7 @@ def verify_history(
                 {
                     "product": product,
                     "variable": variable,
+                    "truth_semantics": truth_semantics,
                     "lead_bucket": str(lead_bucket),
                     "method_id": str(method_id),
                     "dataset_fingerprint": dataset,
@@ -140,7 +149,7 @@ def verify_history(
                 }
             )
     return pl.DataFrame(rows, schema=_VERIFICATION_SCHEMA).sort(
-        "product", "variable", "lead_bucket", "live_mae"
+        "product", "variable", "truth_semantics", "lead_bucket", "live_mae"
     )
 
 
@@ -148,13 +157,16 @@ def compare_to_backtest(live: pl.DataFrame, board: pl.DataFrame) -> pl.DataFrame
     """Live MAE beside the backtest's expectation for the same method."""
     if live.is_empty() or board.is_empty():
         return live
-    expected = board.group_by("product", "variable", "lead_bucket", "method_id").agg(
+    identity = ["product", "variable", "lead_bucket", "method_id"]
+    if "truth_semantics" in live.columns and "truth_semantics" in board.columns:
+        identity.insert(2, "truth_semantics")
+    expected = board.group_by(*identity).agg(
         ((pl.col("mae") * pl.col("n")).sum() / pl.col("n").sum()).alias("backtest_mae")
     )
     return (
         live.join(
             expected,
-            on=["product", "variable", "lead_bucket", "method_id"],
+            on=identity,
             how="left",
         )
         .with_columns((pl.col("live_mae") - pl.col("backtest_mae")).alias("mae_gap"))

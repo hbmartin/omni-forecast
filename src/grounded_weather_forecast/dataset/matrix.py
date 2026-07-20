@@ -759,6 +759,26 @@ def matrix_sources(frame: pl.DataFrame) -> tuple[str, ...]:
     return tuple(sorted(sources))
 
 
+def matrix_feature_columns(frame: pl.DataFrame) -> tuple[str, ...]:
+    """Exact ordered schema of contextual features exposed to blenders."""
+    named_features = {
+        "issue_time",
+        "valid_time",
+        "forecast_date",
+        "truth_known_at",
+        "lead_bucket",
+        "valid_hour_local",
+        "valid_month",
+        *CONTEXT_FEATURE_COLUMNS,
+    }
+    return tuple(
+        column
+        for column in frame.columns
+        if column in named_features
+        or column.startswith(("age__", "obs__", "ewagg__", "ens__"))
+    )
+
+
 def truth_column_for(variable: VariableSpec, semantics: TruthSemantics) -> str:
     if variable.has_dual_semantics:
         return truth_col(variable.name, semantics)
@@ -797,22 +817,7 @@ def to_forecast_matrix(
             for source in chosen
         ]
     ).astype(np.float64)
-    feature_columns = [
-        c
-        for c in usable.columns
-        if c
-        in (
-            "issue_time",
-            "valid_time",
-            "forecast_date",
-            "truth_known_at",
-            "lead_bucket",
-            "valid_hour_local",
-            "valid_month",
-            *CONTEXT_FEATURE_COLUMNS,
-        )
-        or c.startswith(("age__", "obs__", "ewagg__", "ens__"))
-    ]
+    feature_columns = matrix_feature_columns(usable)
     return ForecastMatrix.build(
         sources=chosen,
         values=values if usable.height else np.empty((0, len(chosen))),
@@ -853,22 +858,7 @@ def to_supervised_slice(
             for source in sources
         ]
     ).astype(np.float64)
-    feature_columns = [
-        c
-        for c in usable.columns
-        if c
-        in (
-            "issue_time",
-            "valid_time",
-            "forecast_date",
-            "truth_known_at",
-            "lead_bucket",
-            "valid_hour_local",
-            "valid_month",
-            *CONTEXT_FEATURE_COLUMNS,
-        )
-        or c.startswith(("age__", "obs__", "ewagg__", "ens__"))
-    ]
+    feature_columns = matrix_feature_columns(usable)
     x = ForecastMatrix.build(
         sources=sources,
         values=values if usable.height else np.empty((0, len(sources))),

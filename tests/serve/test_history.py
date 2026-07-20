@@ -69,6 +69,7 @@ class TestHistory:
         assert hourly["method_id"] == "grounded_equal_weight"
         assert hourly["valid_time"] == utc(2026, 3, 22, 18)
         assert hourly["dataset_fingerprint"] == "abc123"
+        assert hourly["truth_semantics"] == "inst"
 
     def test_append_accumulates(self, tmp_path):
         path = tmp_path / "history.parquet"
@@ -266,6 +267,53 @@ class TestVerification:
             "release-short",
             "release-long",
         }
+
+    def test_hourly_truth_semantics_are_scored_as_separate_targets(self, tmp_path):
+        path = tmp_path / "history.parquet"
+        base = replace(make_forecast(20.0), schema_version=4)
+        mean_point = replace(base.hourly[0], truth_semantics={"temp_c": "mean"})
+        instantaneous_point = replace(
+            base.hourly[0],
+            values={"temp_c": 100.0},
+            truth_semantics={"temp_c": "inst"},
+        )
+        for _ in range(5):
+            append_history(replace(base, hourly=[mean_point]), path)
+            append_history(replace(base, hourly=[instantaneous_point]), path)
+        truth = pl.DataFrame(
+            {
+                "valid_hour": [utc(2026, 3, 22, 18)],
+                "t__temp_c__inst": [100.0],
+                "t__temp_c__mean": [20.0],
+            },
+            schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+        )
+
+        hourly = verify_history(path, truth).filter(pl.col("product") == "hourly")
+
+        assert hourly.height == 2
+        assert set(hourly["truth_semantics"].to_list()) == {"inst", "mean"}
+        assert hourly["live_mae"].to_list() == [0.0, 0.0]
+        board = pl.DataFrame(
+            {
+                "product": ["hourly", "hourly"],
+                "variable": ["temp_c", "temp_c"],
+                "truth_semantics": ["inst", "mean"],
+                "lead_bucket": ["1-3h", "1-3h"],
+                "method_id": ["grounded_equal_weight", "grounded_equal_weight"],
+                "n": [100, 100],
+                "mae": [1.0, 2.0],
+            }
+        )
+        compared = compare_to_backtest(hourly, board)
+        expected = dict(
+            zip(
+                compared["truth_semantics"],
+                compared["backtest_mae"],
+                strict=True,
+            )
+        )
+        assert expected == {"inst": 1.0, "mean": 2.0}
 
     def test_empty_history(self, tmp_path):
         assert verify_history(tmp_path / "none.parquet", self.truth([20.0])).is_empty()

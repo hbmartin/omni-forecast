@@ -218,6 +218,11 @@ def leaderboard(
             row: dict[str, object] = {
                 "product": product,
                 "variable": variable,
+                "truth_semantics": (
+                    str(method_scores["semantics"][0])
+                    if "semantics" in method_scores.columns
+                    else "inst"
+                ),
                 "lead_bucket": lead_bucket,
                 "method_id": method_id,
                 "n": method_scores.height,
@@ -261,8 +266,12 @@ def aggregate_leaderboard(board: pl.DataFrame) -> pl.DataFrame:
     """Headline view: per (product, variable, method), n-weighted overall MAE."""
     if board.is_empty():
         return board
+    group_columns = ["product", "variable"]
+    if "truth_semantics" in board.columns:
+        group_columns.append("truth_semantics")
+    group_columns.append("method_id")
     return (
-        board.group_by("product", "variable", "method_id")
+        board.group_by(*group_columns)
         .agg(
             pl.col("n").sum().alias("n"),
             ((pl.col("mae") * pl.col("n")).sum() / pl.col("n").sum()).alias("mae"),

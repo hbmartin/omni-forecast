@@ -6,6 +6,7 @@ import pytest
 from conftest import make_forecast_db, make_station_db, minute_series, utc, write_config
 
 from grounded_weather_forecast.cli import main
+from grounded_weather_forecast.contracts import TruthSemantics
 from grounded_weather_forecast.dataset.matrix import write_dataset
 from grounded_weather_forecast.serve.predict import (
     NoForecastDataError,
@@ -221,6 +222,29 @@ class TestPredict:
         assert first.methods["temp_c"] == "equal_weight"
         assert "unknown method retired_method" in first.selection_reasons["temp_c"]
         assert "retired-release" not in document.release_ids
+
+    def test_semantics_mismatch_degrades_without_release_provenance(self, config):
+        selections = {
+            ("hourly", "temp_c", "0-1h"): Selection(
+                "gbm",
+                reason="instantaneous winner",
+                release_id="instantaneous-release",
+                truth_semantics="inst",
+            )
+        }
+
+        document = predict(
+            config,
+            selections,
+            now=NOW,
+            semantics={"temp_c": TruthSemantics.INTERVAL_MEAN},
+        )
+
+        first = document.hourly[0]
+        assert first.methods["temp_c"] == "equal_weight"
+        assert first.truth_semantics["temp_c"] == "mean"
+        assert "requested mean" in first.selection_reasons["temp_c"]
+        assert "instantaneous-release" not in document.release_ids
 
     def test_fallback_method_when_no_scores(self, config):
         document = predict(config, {}, now=NOW)
@@ -887,6 +911,18 @@ class TestServingPathFitting:
         np.testing.assert_allclose(
             refitted[0]["ewa"].point, baseline[0]["ewa"].point, atol=1e-9
         )
+
+    def test_a_non_object_pointer_does_not_abort_stateful_serving(self, tmp_path):
+        config = write_config(tmp_path)
+        state_dir = config.artifacts_dir / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "latest.json").write_text("[]", encoding="utf-8")
+
+        fitted = self._fit(config, {"ewa"})
+
+        assert fitted is not None
+        assert fitted[0]["ewa"].point.size > 0
+        assert (state_dir / "latest.json").read_text(encoding="utf-8") == "[]"
 
     def test_observability_is_snapshotted_through_the_serving_path(self, tmp_path):
         config = write_config(tmp_path)

@@ -170,6 +170,28 @@ class TestNeighbors:
         assert checks.correlation_alert is None
         assert "got 32" in checks.correlation_reason
 
+    def test_omitted_consensus_hours_do_not_make_old_pairs_current(self):
+        hours = [START + timedelta(hours=index) for index in range(100)]
+        truth = pl.DataFrame(
+            {
+                "valid_hour": hours,
+                "t__temp_c__inst": [float(index) for index in range(100)],
+            },
+            schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+        )
+        consensus = pl.DataFrame(
+            {
+                "valid_hour": hours[:60],
+                "consensus_c": [float(index) * 1.1 for index in range(60)],
+            },
+            schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+        )
+
+        checks = cross_check(truth, consensus)
+
+        assert checks.correlation_alert is None
+        assert "got 32" in checks.correlation_reason
+
     def test_comparison_exposes_independent_residual_and_wind(self):
         neighbors = parse_neighbors(payload(), SITE_ELEVATION, 300.0, 6.5)
         truth = station_truth().with_columns(

@@ -53,6 +53,24 @@ class TestArtifactStore:
         assert fingerprint == "bbb"
         assert state == {}
 
+    def test_latest_state_does_not_require_the_manifest(self, tmp_path):
+        store = ArtifactStore(root=tmp_path / "artifacts")
+        slot = store.save(
+            fingerprint="aaa",
+            method_id="ewa",
+            product="hourly",
+            variable="temp_c",
+            state={"generation": "warm"},
+        )
+        (slot / "manifest.json").unlink()
+
+        fingerprint, state = store.load_latest_state(
+            method_id="ewa", product="hourly", variable="temp_c"
+        )
+
+        assert fingerprint == "aaa"
+        assert state == {"generation": "warm"}
+
     def test_latest_state_rejects_inconsistent_pointer(self, tmp_path):
         store = ArtifactStore(root=tmp_path / "artifacts")
         store.save(
@@ -206,6 +224,49 @@ class TestConcurrentSaves:
             "generation": "recoverable"
         }
         assert pointer.read_text(encoding="utf-8") == payload
+
+    def test_a_malformed_pointer_entry_cannot_trigger_reclamation(self, tmp_path):
+        store = ArtifactStore(tmp_path / "state")
+        recoverable = store.save(
+            fingerprint="existing",
+            method_id="ewa",
+            product="hourly",
+            variable="temp_c",
+            state={"generation": "recoverable"},
+        )
+        pointer = store._latest_path()
+        malformed = '{"hourly.temp_c.ewa": []}'
+        pointer.write_text(malformed, encoding="utf-8")
+
+        with pytest.raises(ArtifactError, match="corrupt artifact pointer"):
+            store.save(
+                fingerprint="new",
+                method_id="ewa",
+                product="hourly",
+                variable="dew_point_c",
+                state={"generation": "new"},
+                reclaim_unreferenced=True,
+            )
+
+        assert recoverable.exists()
+        assert pointer.read_text(encoding="utf-8") == malformed
+
+    def test_a_pointer_key_must_match_its_entry_identity(self, tmp_path):
+        store = ArtifactStore(tmp_path / "state")
+        store.save(
+            fingerprint="existing",
+            method_id="ewa",
+            product="hourly",
+            variable="temp_c",
+            state={},
+        )
+        pointer = store._latest_path()
+        latest = store.read_latest()
+        latest["hourly.dew_point_c.ewa"] = latest.pop("hourly.temp_c.ewa")
+        pointer.write_text(json.dumps(latest), encoding="utf-8")
+
+        with pytest.raises(ArtifactError, match="inconsistent artifact pointer key"):
+            store.read_latest()
 
 
 class TestReclamationIsSafeUnderConcurrency:

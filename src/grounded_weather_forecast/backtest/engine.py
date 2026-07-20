@@ -30,6 +30,7 @@ from grounded_weather_forecast.config import Config
 from grounded_weather_forecast.contracts import Product, TruthSemantics, VariableSpec
 from grounded_weather_forecast.dataset.matrix import (
     assert_single_kind,
+    matrix_feature_columns,
     matrix_sources,
     to_supervised_slice,
     truth_column_for,
@@ -98,6 +99,7 @@ def run_backtest(
         config,
         source_kind=kind,
         source_set=matrix_sources(matrix),
+        feature_set=matrix_feature_columns(matrix),
         product=product,
         window=request.window,
         semantics=semantics_by_variable,
@@ -160,6 +162,9 @@ def run_backtest(
                         ),
                         pl.lit(json.dumps(evaluation.source_set)).alias(
                             "source_set_json"
+                        ),
+                        pl.lit(json.dumps(evaluation.feature_set)).alias(
+                            "feature_set_json"
                         ),
                         pl.lit(semantics.value).alias("semantics"),
                         pl.lit(evaluation.code_version).alias("code_version"),

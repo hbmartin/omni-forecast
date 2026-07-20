@@ -11,6 +11,7 @@ from pathlib import Path
 
 import polars as pl
 
+from grounded_weather_forecast.contracts import TruthSemantics
 from grounded_weather_forecast.serve.schema import Forecast
 from grounded_weather_forecast.storage import (
     atomic_write_parquet,
@@ -32,6 +33,7 @@ HISTORY_SCHEMA: pl.Schema = pl.Schema(
         "dataset_fingerprint": pl.String(),
         "release_id": pl.String(),
         "selection_reason": pl.String(),
+        "truth_semantics": pl.String(),
         "quantiles_json": pl.String(),
     }
 )
@@ -77,6 +79,7 @@ def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
                     "dataset_fingerprint": forecast.dataset_fingerprint,
                     "release_id": legacy_release,
                     "selection_reason": None,
+                    "truth_semantics": TruthSemantics.INSTANTANEOUS.value,
                     "quantiles_json": _quantiles_json(point.quantiles.get(variable)),
                 }
             )
@@ -97,6 +100,9 @@ def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
                     "dataset_fingerprint": forecast.dataset_fingerprint,
                     "release_id": point.release_ids.get(variable, legacy_release),
                     "selection_reason": point.selection_reasons.get(variable),
+                    "truth_semantics": point.truth_semantics.get(
+                        variable, TruthSemantics.INSTANTANEOUS.value
+                    ),
                     "quantiles_json": _quantiles_json(point.quantiles.get(variable)),
                 }
             )
@@ -119,6 +125,9 @@ def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
                     "dataset_fingerprint": forecast.dataset_fingerprint,
                     "release_id": daily.release_ids.get(variable, legacy_release),
                     "selection_reason": daily.selection_reasons.get(variable),
+                    "truth_semantics": daily.truth_semantics.get(
+                        variable, TruthSemantics.INSTANTANEOUS.value
+                    ),
                     "quantiles_json": _quantiles_json(daily.quantiles.get(variable)),
                 }
             )
@@ -130,6 +139,7 @@ def forecast_to_rows(forecast: Forecast) -> pl.DataFrame:
             schema_overrides={
                 "valid_date": pl.String(),
                 "selection_reason": pl.String(),
+                "truth_semantics": pl.String(),
                 "quantiles_json": pl.String(),
             },
         )

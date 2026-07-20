@@ -19,6 +19,7 @@ import polars as pl
 
 from grounded_weather_forecast.backtest.scores import load_scores
 from grounded_weather_forecast.config import Config
+from grounded_weather_forecast.contracts import TruthSemantics
 from grounded_weather_forecast.evaluation import (
     ModelRelease,
     code_identity,
@@ -62,13 +63,14 @@ class Selection:
     # before behaviour flags were introduced.
     pinned: bool = False
     degraded: bool = False
+    truth_semantics: str | None = None
 
 
 type SelectionMap = Mapping[tuple[str, str, str], Selection]
 type SliceKey = tuple[str, str, str]
 type LiveKey = tuple[str, str, str, str]
 type EligibleReleases = Mapping[LiveKey, frozenset[str]]
-type EvaluationCompatibility = tuple[str, frozenset[str], str]
+type EvaluationCompatibility = tuple[str, frozenset[str], str, tuple[str, ...]]
 
 
 def _pins(config: Config) -> dict[tuple[str, str], str]:
@@ -82,7 +84,10 @@ def _pins(config: Config) -> dict[tuple[str, str], str]:
 
 
 def _compatible_scores(
-    config: Config, scores_dir: Path, as_of: datetime | None
+    config: Config,
+    scores_dir: Path,
+    as_of: datetime | None,
+    semantics: Mapping[str, TruthSemantics] | None,
 ) -> list[pl.DataFrame]:
     current_dataset = dataset_fingerprint(config)
     current_code = code_identity()
@@ -97,6 +102,9 @@ def _compatible_scores(
             "evaluation_id",
             "evaluation_created_at",
             "code_version",
+            "source_set_json",
+            "feature_set_json",
+            "semantics",
         }
         if not required_identity <= set(scores.columns):
             continue
@@ -105,6 +113,12 @@ def _compatible_scores(
             pl.col("config_fingerprint") == config_fingerprint(config)
         )
         scores = scores.filter(pl.col("code_version") == current_code)
+        for variable, truth_semantics in (semantics or {}).items():
+            scores = scores.filter(
+                (pl.col("product") != "hourly")
+                | (pl.col("variable") != variable)
+                | (pl.col("semantics") == truth_semantics.value)
+            )
         if as_of is not None:
             scores = scores.filter(pl.col("evaluation_created_at") <= as_of)
         if as_of is not None:
@@ -155,6 +169,7 @@ def _selection_payload(
             "code_version": selected.code_version,
             "n": selected.n,
             "mae": selected.mae,
+            "truth_semantics": selected.truth_semantics,
         }
         for key, selected in sorted(selections.items())
     }
@@ -175,6 +190,7 @@ def _evaluation_contexts(
                 "evaluation_id": str(evaluation_key[0]),
                 "source_kind": str(frame["source_kind"][0]),
                 "source_set_json": str(frame["source_set_json"][0]),
+                "feature_set_json": str(frame["feature_set_json"][0]),
                 "semantics": {
                     str(row["variable"]): str(row["semantics"])
                     for row in frame.select("variable", "semantics")
@@ -213,11 +229,17 @@ def _evaluation_compatibility(
     if context is None or context.get("source_kind") != "live":
         return None
     raw_source_set = context.get("source_set_json")
+    raw_feature_set = context.get("feature_set_json")
     semantics = context.get("semantics")
-    if not isinstance(raw_source_set, str) or not isinstance(semantics, Mapping):
+    if (
+        not isinstance(raw_source_set, str)
+        or not isinstance(raw_feature_set, str)
+        or not isinstance(semantics, Mapping)
+    ):
         return None
     try:
         sources = json.loads(raw_source_set)
+        features = json.loads(raw_feature_set)
     except (json.JSONDecodeError, TypeError):
         return None
     semantic = semantics.get(variable)
@@ -225,11 +247,18 @@ def _evaluation_compatibility(
         not isinstance(sources, list)
         or not sources
         or not all(isinstance(source, str) and source for source in sources)
+        or not isinstance(features, list)
+        or not all(isinstance(feature, str) and feature for feature in features)
         or not isinstance(semantic, str)
         or not semantic
     ):
         return None
-    return ("live", frozenset(cast(str, source) for source in sources), semantic)
+    return (
+        "live",
+        frozenset(cast(str, source) for source in sources),
+        semantic,
+        tuple(cast(str, feature) for feature in features),
+    )
 
 
 def _make_release(
@@ -330,6 +359,9 @@ def _selections_from_release(release: Mapping[str, object]) -> SelectionMap | No
             dataset_fingerprint=dataset,
             release_id=release_id,
             code_version=_release_selection_code_version(release, selection_mapping),
+            truth_semantics=_release_selection_truth_semantics(
+                release, selection_mapping, variable
+            ),
         )
     return selections
 
@@ -356,6 +388,35 @@ def _release_selection_code_version(
         ):
             versions.add(version)
     return next(iter(versions)) if len(versions) == 1 else None
+
+
+def _release_selection_truth_semantics(
+    release: Mapping[str, object],
+    selection: Mapping[str, object],
+    variable: str,
+) -> str | None:
+    """Truth target used to evaluate one persisted serving selection."""
+    direct = selection.get("truth_semantics")
+    if isinstance(direct, str) and direct:
+        return direct
+    evaluation_id = selection.get("evaluation_id")
+    contexts = release.get("evaluation_contexts")
+    if not isinstance(contexts, list):
+        return None
+    values: set[str] = set()
+    for raw_context in contexts:
+        if not isinstance(raw_context, dict):
+            continue
+        context = cast(Mapping[str, object], raw_context)
+        raw_semantics = context.get("semantics")
+        semantic = (
+            raw_semantics.get(variable) if isinstance(raw_semantics, Mapping) else None
+        )
+        if isinstance(semantic, str) and (
+            evaluation_id is None or context.get("evaluation_id") == evaluation_id
+        ):
+            values.add(semantic)
+    return next(iter(values)) if len(values) == 1 else None
 
 
 def _eligible_release_ids(
@@ -414,7 +475,11 @@ def _eligible_release_ids(
     return {key: frozenset(releases) for key, releases in eligible.items()}
 
 
-def _release_as_of(config: Config, as_of: datetime) -> SelectionMap | None:
+def _release_as_of(
+    config: Config,
+    as_of: datetime,
+    semantics: Mapping[str, TruthSemantics] | None,
+) -> SelectionMap | None:
     """Newest release that genuinely existed by a historical issue time."""
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=UTC)
@@ -431,6 +496,12 @@ def _release_as_of(config: Config, as_of: datetime) -> SelectionMap | None:
                 selected.code_version != current_code
                 for selected in selections.values()
             )
+            or any(
+                key[0] == "hourly"
+                and key[1] in (semantics or {})
+                and selected.truth_semantics != (semantics or {})[key[1]].value
+                for key, selected in selections.items()
+            )
         ):
             continue
         with suppress(TypeError, ValueError):
@@ -444,14 +515,18 @@ def _release_as_of(config: Config, as_of: datetime) -> SelectionMap | None:
 
 
 def select_methods(
-    config: Config, scores_dir: Path, as_of: datetime | None = None
+    config: Config,
+    scores_dir: Path,
+    as_of: datetime | None = None,
+    *,
+    semantics: Mapping[str, TruthSemantics] | None = None,
 ) -> SelectionMap:
     """Select only live evidence compatible with this dataset and issue time."""
     if as_of is not None:
-        return _release_as_of(config, as_of) or {}
+        return _release_as_of(config, as_of, semantics) or {}
     pinned = _pins(config)
     selections: dict[tuple[str, str, str], Selection] = {}
-    compatible = _compatible_scores(config, scores_dir, as_of)
+    compatible = _compatible_scores(config, scores_dir, as_of, semantics)
     slices = _newest_complete_slices(compatible)
     selected_scores: list[pl.DataFrame] = []
     fallbacks: dict[SliceKey, Selection] = {}
@@ -476,6 +551,7 @@ def select_methods(
             evaluation_id=evaluation_id,
             dataset_fingerprint=dataset_fingerprint(config),
             code_version=str(frame["code_version"][0]),
+            truth_semantics=str(frame["semantics"][0]),
         )
         fallback_rows = board.filter(pl.col("method_id") == FALLBACK_METHOD).sort("mae")
         if not fallback_rows.is_empty():
@@ -488,6 +564,7 @@ def select_methods(
                 evaluation_id=evaluation_id,
                 dataset_fingerprint=dataset_fingerprint(config),
                 code_version=str(frame["code_version"][0]),
+                truth_semantics=str(frame["semantics"][0]),
             )
     for (product, variable), method_id in pinned.items():
         for key in [key for key in selections if key[:2] == (product, variable)]:
@@ -633,6 +710,7 @@ def _gate_fallback(
         FALLBACK_METHOD,
         reason="reference fallback",
         dataset_fingerprint=selected.dataset_fingerprint,
+        truth_semantics=selected.truth_semantics,
     )
 
 
@@ -773,6 +851,7 @@ def selection_report(selections: SelectionMap) -> pl.DataFrame:
             "reason": chosen.reason,
             "evaluation_id": chosen.evaluation_id,
             "release_id": chosen.release_id,
+            "truth_semantics": chosen.truth_semantics,
         }
         for (product, variable, bucket), chosen in sorted(selections.items())
     ]

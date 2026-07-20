@@ -21,6 +21,7 @@ SCORES_SCHEMA: pl.Schema = pl.Schema(
         "evaluation_created_at": pl.Datetime("us", "UTC"),
         "dataset_fingerprint": pl.String(),
         "source_set_json": pl.String(),
+        "feature_set_json": pl.String(),
         "semantics": pl.String(),
         "code_version": pl.String(),
         "config_fingerprint": pl.String(),
