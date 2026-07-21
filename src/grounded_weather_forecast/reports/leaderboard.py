@@ -195,12 +195,21 @@ def leaderboard(
 ) -> pl.DataFrame:
     """Per (product, variable, lead bucket, method): every reported view."""
     rows: list[dict[str, object]] = []
-    slice_keys = ("product", "variable", "lead_bucket")
+    # Semantics joins the slice identity so a concatenated frame cannot pool
+    # two truth targets into one row; per-evaluation frames are unaffected.
+    slice_keys = (
+        ("product", "variable", "semantics", "lead_bucket")
+        if "semantics" in scores.columns
+        else ("product", "variable", "lead_bucket")
+    )
     cases = ["issue_time", "valid_time"]
     for slice_key, slice_scores in scores.partition_by(
         list(slice_keys), as_dict=True
     ).items():
-        product, variable, lead_bucket = (str(part) for part in slice_key)
+        parts = dict(zip(slice_keys, (str(part) for part in slice_key), strict=True))
+        product = parts["product"]
+        variable = parts["variable"]
+        lead_bucket = parts["lead_bucket"]
         methods = slice_scores["method_id"].unique().sort().to_list()
         n_total = slice_scores.select(cases).unique().height
         lead_lo = float(np.min(slice_scores["lead_hours"].to_numpy()))
@@ -218,11 +227,7 @@ def leaderboard(
             row: dict[str, object] = {
                 "product": product,
                 "variable": variable,
-                "truth_semantics": (
-                    str(method_scores["semantics"][0])
-                    if "semantics" in method_scores.columns
-                    else "inst"
-                ),
+                "truth_semantics": parts.get("semantics", "inst"),
                 "lead_bucket": lead_bucket,
                 "method_id": method_id,
                 "n": method_scores.height,
@@ -364,6 +369,9 @@ def slice_winners(
         return board
     winners: list[dict[str, object]] = []
     keys = ["product", "variable", "lead_bucket"]
+    if "truth_semantics" in board.columns:
+        keys.insert(2, "truth_semantics")
+    output_columns = (*keys, "method_id", "n", "mae")
     for slice_key, group in board.partition_by(keys, as_dict=True).items():
         eligible = group.filter(
             (pl.col("coverage") >= 0.8)
@@ -389,12 +397,16 @@ def slice_winners(
                 else:
                     continue
             elif rule == "mcs" and scores is not None:
-                product, variable, lead_bucket = slice_key
+                parts = dict(zip(keys, slice_key, strict=True))
                 slice_scores = scores.filter(
-                    (pl.col("product") == product)
-                    & (pl.col("variable") == variable)
-                    & (pl.col("lead_bucket") == lead_bucket)
+                    (pl.col("product") == parts["product"])
+                    & (pl.col("variable") == parts["variable"])
+                    & (pl.col("lead_bucket") == parts["lead_bucket"])
                 )
+                if "truth_semantics" in parts and "semantics" in scores.columns:
+                    slice_scores = slice_scores.filter(
+                        pl.col("semantics") == parts["truth_semantics"]
+                    )
                 candidate = _mcs_gate(
                     candidate,
                     reference_rows,
@@ -409,11 +421,5 @@ def slice_winners(
                 candidate = _reference_fallback(reference_rows)
         winners.append(candidate)
     if not winners:
-        return board.select(
-            "product", "variable", "lead_bucket", "method_id", "n", "mae"
-        ).head(0)
-    return (
-        pl.DataFrame(winners)
-        .select("product", "variable", "lead_bucket", "method_id", "n", "mae")
-        .sort(*keys)
-    )
+        return board.select(*output_columns).head(0)
+    return pl.DataFrame(winners).select(*output_columns).sort(*keys)

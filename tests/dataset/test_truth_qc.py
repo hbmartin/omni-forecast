@@ -192,6 +192,29 @@ class TestNeighbors:
         assert checks.correlation_alert is None
         assert "got 32" in checks.correlation_reason
 
+    def test_a_naive_as_of_is_anchored_as_utc(self):
+        hours = [START + timedelta(hours=index) for index in range(100)]
+        truth = pl.DataFrame(
+            {
+                "valid_hour": hours,
+                "t__temp_c__inst": [float(index) for index in range(100)],
+            },
+            schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+        )
+        consensus = pl.DataFrame(
+            {
+                "valid_hour": hours[:60],
+                "consensus_c": [float(index) * 1.1 for index in range(60)],
+            },
+            schema_overrides={"valid_hour": pl.Datetime("us", "UTC")},
+        )
+        naive = (START + timedelta(hours=99)).replace(tzinfo=None)
+
+        checks = cross_check(truth, consensus, as_of=naive)
+
+        assert checks.correlation_alert is None
+        assert "got 32" in checks.correlation_reason
+
     def test_comparison_exposes_independent_residual_and_wind(self):
         neighbors = parse_neighbors(payload(), SITE_ELEVATION, 300.0, 6.5)
         truth = station_truth().with_columns(

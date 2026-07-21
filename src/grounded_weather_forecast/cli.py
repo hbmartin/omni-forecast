@@ -10,7 +10,11 @@ import polars as pl
 
 from grounded_weather_forecast import __version__
 from grounded_weather_forecast.config import Config, ConfigError, load_config
-from grounded_weather_forecast.contracts import HOURLY_VARIABLES, TruthSemantics
+from grounded_weather_forecast.contracts import (
+    HOURLY_VARIABLES,
+    TruthSemantics,
+    VariableSpec,
+)
 
 HOURLY_DEFAULT_VARIABLES = (
     "temp_c,humidity_pct,dew_point_c,wind_speed_ms,wind_gust_ms,"
@@ -81,7 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "inst", "mean"),
         default="auto",
         help="hourly truth semantics: inst, mean, or auto (alignment artifact"
-        " majority recommendation, falling back to inst)",
+        " majority recommendation, falling back to inst); variables without"
+        " dual semantics always use inst",
     )
     subparsers.add_parser(
         "report", help="render leaderboards and correlation reports from scores"
@@ -274,10 +279,22 @@ def _resolve_semantics(
 
 
 def _semantics_by_variable(
-    config: Config, flag: str, variables: Sequence[str]
+    config: Config, flag: str, variables: Sequence[VariableSpec]
 ) -> dict[str, TruthSemantics]:
+    """Requested truth target per variable name.
+
+    A variable without dual semantics is only ever evaluated against its
+    single instantaneous truth column, and backtest evidence records it that
+    way. Binding it to an explicit ``--semantics mean`` would demand evidence
+    that cannot exist, stranding the variable on the no-evidence fallback.
+    """
     return {
-        variable: _resolve_semantics(config, flag, variable) for variable in variables
+        variable.name: (
+            _resolve_semantics(config, flag, variable.name)
+            if variable.has_dual_semantics
+            else TruthSemantics.INSTANTANEOUS
+        )
+        for variable in variables
     }
 
 
@@ -536,11 +553,7 @@ def _cmd_predict(config: Config, args: argparse.Namespace) -> int:
     now = args.now
     if now is not None and now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
-    semantics = _semantics_by_variable(
-        config,
-        args.semantics,
-        tuple(variable.name for variable in HOURLY_VARIABLES),
-    )
+    semantics = _semantics_by_variable(config, args.semantics, HOURLY_VARIABLES)
     selections = (
         select_methods(
             config,
@@ -602,9 +615,7 @@ def _cmd_backtest(config: Config, args: argparse.Namespace) -> int:
     methods = available_methods() if args.methods == "all" else _split_csv(args.methods)
     products = _split_csv(args.products)
     promotion_semantics = _semantics_by_variable(
-        config,
-        args.semantics,
-        tuple(variable.name for variable in HOURLY_VARIABLES),
+        config, args.semantics, HOURLY_VARIABLES
     )
     total = 0
     for product in products:
@@ -623,11 +634,12 @@ def _cmd_backtest(config: Config, args: argparse.Namespace) -> int:
             print(f"{product}: matrix carries {kinds}, expected [{args.source}]")
             return 1
         names = _split_csv(args.daily_variables if daily else args.hourly_variables)
-        semantics = _semantics_by_variable(config, args.semantics, names)
+        variables = variables_from_names(
+            names, DAILY_VARIABLES if daily else HOURLY_VARIABLES
+        )
+        semantics = _semantics_by_variable(config, args.semantics, variables)
         request = BacktestRequest(
-            variables=variables_from_names(
-                names, DAILY_VARIABLES if daily else HOURLY_VARIABLES
-            ),
+            variables=variables,
             methods=methods,
             window=args.window,
             daily=daily,

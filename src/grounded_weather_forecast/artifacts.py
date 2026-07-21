@@ -31,9 +31,10 @@ _RESERVED_MANIFEST_KEYS = frozenset(
 class ArtifactStore:
     root: Path
 
-    def _slot(
+    def slot_path(
         self, fingerprint: str, method_id: str, product: str, variable: str
     ) -> Path:
+        """Filesystem slot holding one identity's state and manifest."""
         return self.root / fingerprint / method_id / f"{product}.{variable}"
 
     def save(
@@ -48,7 +49,7 @@ class ArtifactStore:
         reclaim_unreferenced: bool = False,
         lock_timeout: float = -1,
     ) -> Path:
-        slot = self._slot(fingerprint, method_id, product, variable)
+        slot = self.slot_path(fingerprint, method_id, product, variable)
         if overlap := _RESERVED_MANIFEST_KEYS.intersection(meta or {}):
             msg = f"artifact metadata may not override reserved keys: {sorted(overlap)}"
             raise ArtifactError(msg)
@@ -64,7 +65,7 @@ class ArtifactStore:
         # the pointer's read-modify-write cannot interleave with another serve.
         # `predict` runs every 10 minutes over several variables, so concurrent
         # saves into one store are the normal case, not an edge case.
-        with locked_path(self._latest_path(), timeout=lock_timeout):
+        with locked_path(self.latest_path, timeout=lock_timeout):
             # Validate the pointer map before touching a possibly existing slot.
             # A corrupt pointer must not let a failed save overwrite recoverable
             # state even when the caller reuses the same fingerprint.
@@ -119,13 +120,13 @@ class ArtifactStore:
     def load_state(
         self, *, fingerprint: str, method_id: str, product: str, variable: str
     ) -> dict[str, Any]:
-        slot = self._slot(fingerprint, method_id, product, variable)
+        slot = self.slot_path(fingerprint, method_id, product, variable)
         return self._read_slot_json(slot / "state.json", "state")
 
     def load_manifest(
         self, *, fingerprint: str, method_id: str, product: str, variable: str
     ) -> dict[str, Any]:
-        slot = self._slot(fingerprint, method_id, product, variable)
+        slot = self.slot_path(fingerprint, method_id, product, variable)
         return self._read_slot_json(slot / "manifest.json", "manifest")
 
     def load_latest_state(
@@ -137,7 +138,7 @@ class ArtifactStore:
         advancing, so a new dataset fingerprint does not by itself force a
         replay. The pointer identity is checked before it is trusted.
         """
-        with locked_path(self._latest_path()):
+        with locked_path(self.latest_path):
             identity = self._latest_identity(
                 method_id=method_id,
                 product=product,
@@ -154,7 +155,7 @@ class ArtifactStore:
         lock_timeout: float = -1,
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         """Load one current state and manifest while reclamation is excluded."""
-        with locked_path(self._latest_path(), timeout=lock_timeout):
+        with locked_path(self.latest_path, timeout=lock_timeout):
             identity = self._latest_identity(
                 method_id=method_id,
                 product=product,
@@ -181,13 +182,10 @@ class ArtifactStore:
             raise ArtifactError(msg)
         return dict(pointer)
 
-    def _latest_path(self) -> Path:
-        return self.root / "latest.json"
-
     @property
     def latest_path(self) -> Path:
         """Path to the shared latest-pointer document."""
-        return self._latest_path()
+        return self.root / "latest.json"
 
     def read_latest(self) -> dict[str, dict[str, str]]:
         """The pointer map, or an ArtifactError if it exists but cannot be read.
@@ -196,7 +194,7 @@ class ArtifactStore:
         unreadable one is not: returning ``{}`` there would let a reclamation
         pass conclude that nothing is referenced and delete every state tree.
         """
-        path = self._latest_path()
+        path = self.latest_path
         if not path.exists():
             return {}
         try:
@@ -221,6 +219,12 @@ class ArtifactStore:
                 value = raw_pointer.get(field)
                 if not isinstance(value, str) or not value:
                     msg = f"corrupt artifact pointer at {path}"
+                    raise ArtifactError(msg)
+                # Every field becomes a path segment under the store root, so
+                # a separator or dot-segment would let a crafted pointer read
+                # or reclaim outside it.
+                if value in {".", ".."} or "/" in value or "\\" in value:
+                    msg = f"unsafe artifact pointer field at {path}"
                     raise ArtifactError(msg)
                 pointer[field] = value
             expected_key = (
@@ -251,6 +255,6 @@ class ArtifactStore:
             "variable": variable,
         }
         atomic_write_text(
-            json.dumps(latest, indent=2, sort_keys=True), self._latest_path()
+            json.dumps(latest, indent=2, sort_keys=True), self.latest_path
         )
         return latest

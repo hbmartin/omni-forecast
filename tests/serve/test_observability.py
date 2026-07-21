@@ -120,7 +120,7 @@ def test_snapshot_lock_timeout_is_swallowed_promptly(tmp_path, monkeypatch):
     blender = fitted()
     monkeypatch.setattr(observability, "_LOCK_TIMEOUT_SECONDS", 0.05)
     store = ArtifactStore(observability_root(config))
-    lock_path = store._latest_path().with_suffix(".json.lock")
+    lock_path = store.latest_path.with_suffix(".json.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
     with FileLock(lock_path):
@@ -146,7 +146,7 @@ def test_reader_uses_one_timeout_for_the_shared_pointer_lock(tmp_path, monkeypat
             state={"index": index},
         )
     monkeypatch.setattr(observability, "_LOCK_TIMEOUT_SECONDS", 0.05)
-    lock_path = store._latest_path().with_suffix(".json.lock")
+    lock_path = store.latest_path.with_suffix(".json.lock")
 
     with FileLock(lock_path):
         started = monotonic()

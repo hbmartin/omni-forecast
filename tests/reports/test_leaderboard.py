@@ -76,6 +76,19 @@ class TestLeaderboard:
         keys = winners.select("product", "variable", "lead_bucket")
         assert keys.unique().height == winners.height
 
+    def test_concatenated_truth_targets_stay_separate_slices(self, scores):
+        single = leaderboard(scores)
+        mixed = leaderboard(
+            pl.concat([scores, scores.with_columns(pl.lit("mean").alias("semantics"))])
+        )
+
+        assert set(mixed["truth_semantics"].to_list()) == {"inst", "mean"}
+        instantaneous = mixed.filter(pl.col("truth_semantics") == "inst")
+        assert instantaneous.height == single.height
+        winners = slice_winners(mixed)
+        keys = winners.select("product", "variable", "truth_semantics", "lead_bucket")
+        assert keys.unique().height == winners.height
+
     def test_empty_scores(self):
         assert leaderboard(empty_scores()).is_empty()
 

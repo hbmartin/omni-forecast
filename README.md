@@ -149,7 +149,12 @@ when configuration, method, implementation identity, provider source set, and
 the exact serving feature schema and per-variable truth semantics all match.
 `predict --semantics` selects matching evaluation evidence and records the
 actual target on every hourly row; a changed ensemble, truth target, or
-implementation cannot inherit an incompatible verdict.
+implementation cannot inherit an incompatible verdict. The flag binds only
+variables with dual truth semantics — single-truth variables (`wind_gust_ms`,
+`precip_mm`, `pop`) always score against instantaneous truth, so a `mean` run
+cannot strand their evidence. Score files written before feature-schema
+identity are ignored by selection; re-run `backtest` after upgrading to
+restore promotions.
 
 ## Status
 
