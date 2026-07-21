@@ -225,13 +225,7 @@ def load_observability_states_with_failures(
                     state = store.load_state(**identity)
                     manifest = store.load_manifest(**identity)
                 except (ArtifactError, OSError, TypeError, ValueError):
-                    failures.append(
-                        artifacts_dir
-                        / "observability"
-                        / pointer["fingerprint"]
-                        / pointer["method_id"]
-                        / f"{pointer['product']}.{pointer['variable']}"
-                    )
+                    failures.append(store.slot_path(**identity))
                     continue
                 issue = manifest.get("issue_time")
                 snapshots.append(
@@ -245,6 +239,9 @@ def load_observability_states_with_failures(
                         state=state,
                     )
                 )
+    # filelock.Timeout subclasses TimeoutError, which subclasses OSError, so
+    # this clause must stay ahead of the OSError handler or lock contention
+    # would be reported as pointer corruption.
     except Timeout:
         return (), ()
     except (ArtifactError, OSError, json.JSONDecodeError):

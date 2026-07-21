@@ -8,7 +8,9 @@ from conftest import make_station_db, write_config
 
 from grounded_weather_forecast import __version__
 from grounded_weather_forecast import cli as cli_module
+from grounded_weather_forecast.backtest.engine import BacktestRequest
 from grounded_weather_forecast.cli import build_parser, main
+from grounded_weather_forecast.contracts import HOURLY_VARIABLES, TruthSemantics
 from grounded_weather_forecast.dataset.neighbors import NeighborChecks
 from grounded_weather_forecast.runs import load_runs
 from grounded_weather_forecast.serve.predict import UnsupportedMethodError
@@ -23,6 +25,29 @@ def test_backfill_start_and_truth_qc_days_are_parsed():
 
     assert backfill.start == date(2026, 2, 1)
     assert truth_qc.days == 45
+
+
+def test_mean_semantics_binds_only_dual_semantics_variables(tmp_path):
+    config = write_config(tmp_path)
+
+    semantics = cli_module._semantics_by_variable(config, "mean", HOURLY_VARIABLES)
+
+    assert semantics["temp_c"] is TruthSemantics.INTERVAL_MEAN
+    assert semantics["wind_gust_ms"] is TruthSemantics.INSTANTANEOUS
+    assert semantics["precip_mm"] is TruthSemantics.INSTANTANEOUS
+    assert semantics["pop"] is TruthSemantics.INSTANTANEOUS
+    # Selection filters evidence on this map while the engine records
+    # semantics_for; any disagreement strands that variable's evidence on the
+    # no-evidence fallback whenever --semantics mean is requested.
+    request = BacktestRequest(
+        variables=HOURLY_VARIABLES,
+        methods=("equal_weight",),
+        semantics=semantics,
+    )
+    recorded = {
+        variable.name: request.semantics_for(variable) for variable in HOURLY_VARIABLES
+    }
+    assert recorded == semantics
 
 
 class TestQcCommand:

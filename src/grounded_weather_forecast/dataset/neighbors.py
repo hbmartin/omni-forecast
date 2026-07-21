@@ -182,6 +182,8 @@ def cross_check(
     as_of: datetime | None = None,
 ) -> NeighborChecks:
     """Station-vs-consensus drift and decorrelation verdicts."""
+    if as_of is not None and as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=UTC)
     truth_columns = ["valid_hour", "t__temp_c__inst"]
     if "t__wind_speed_ms__inst" in truth_hourly.columns:
         truth_columns.append("t__wind_speed_ms__inst")

@@ -82,7 +82,7 @@ class TestArtifactStore:
         )
         latest = store.read_latest()
         latest["hourly.temp_c.gbm"]["variable"] = "wind_speed_ms"
-        store._latest_path().write_text(json.dumps(latest), encoding="utf-8")
+        store.latest_path.write_text(json.dumps(latest), encoding="utf-8")
         with pytest.raises(ArtifactError, match="inconsistent"):
             store.load_latest_state(
                 method_id="gbm", product="hourly", variable="temp_c"
@@ -207,7 +207,7 @@ class TestConcurrentSaves:
             variable="temp_c",
             state={"generation": "recoverable"},
         )
-        pointer = store._latest_path()
+        pointer = store.latest_path
         pointer.write_text(payload, encoding="utf-8")
 
         with pytest.raises(ArtifactError, match="corrupt artifact pointer"):
@@ -234,7 +234,7 @@ class TestConcurrentSaves:
             variable="temp_c",
             state={"generation": "recoverable"},
         )
-        pointer = store._latest_path()
+        pointer = store.latest_path
         malformed = '{"hourly.temp_c.ewa": []}'
         pointer.write_text(malformed, encoding="utf-8")
 
@@ -260,13 +260,38 @@ class TestConcurrentSaves:
             variable="temp_c",
             state={},
         )
-        pointer = store._latest_path()
+        pointer = store.latest_path
         latest = store.read_latest()
         latest["hourly.dew_point_c.ewa"] = latest.pop("hourly.temp_c.ewa")
         pointer.write_text(json.dumps(latest), encoding="utf-8")
 
         with pytest.raises(ArtifactError, match="inconsistent artifact pointer key"):
             store.read_latest()
+
+    def test_a_pointer_field_that_escapes_the_store_is_rejected(self, tmp_path):
+        store = ArtifactStore(tmp_path / "state")
+        store.save(
+            fingerprint="safe",
+            method_id="ewa",
+            product="hourly",
+            variable="temp_c",
+            state={},
+        )
+        entry = dict(store.read_latest()["hourly.temp_c.ewa"])
+        for field, hostile in (
+            ("fingerprint", ".."),
+            ("fingerprint", "../outside"),
+            ("method_id", "ewa/../../outside"),
+            ("variable", "temp_c\\..\\outside"),
+        ):
+            tampered = {**entry, field: hostile}
+            key = (
+                f"{tampered['product']}.{tampered['variable']}.{tampered['method_id']}"
+            )
+            store.latest_path.write_text(json.dumps({key: tampered}), encoding="utf-8")
+
+            with pytest.raises(ArtifactError, match="unsafe artifact pointer"):
+                store.read_latest()
 
 
 class TestReclamationIsSafeUnderConcurrency:
