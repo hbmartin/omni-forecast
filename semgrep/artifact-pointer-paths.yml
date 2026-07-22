@@ -1,0 +1,25 @@
+rules:
+  - id: artifact-pointer-fields-must-not-feed-paths-directly
+    languages: [python]
+    mode: taint
+    severity: ERROR
+    message: >-
+      Validate fields from raw artifact pointers before using them in filesystem
+      paths so platform-specific separators and drive markers cannot escape the
+      artifact store.
+    metadata:
+      category: security
+      technology: [python, pathlib]
+      cwe: CWE-22
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: $RAW_POINTER[$FIELD]
+              - pattern: $RAW_POINTER.get($FIELD)
+          - metavariable-regex:
+              metavariable: $RAW_POINTER
+              regex: ^raw_pointer$
+    pattern-sinks:
+      - pattern-either:
+          - pattern: $BASE / $VALUE
+          - pattern: $BASE.joinpath(..., $VALUE, ...)

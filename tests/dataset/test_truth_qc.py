@@ -192,7 +192,7 @@ class TestNeighbors:
         assert checks.correlation_alert is None
         assert "got 32" in checks.correlation_reason
 
-    def test_a_naive_as_of_is_anchored_as_utc(self):
+    def test_a_naive_as_of_is_anchored_as_utc(self) -> None:
         hours = [START + timedelta(hours=index) for index in range(100)]
         truth = pl.DataFrame(
             {

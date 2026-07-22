@@ -191,6 +191,8 @@ uv sync --dev
 uv run ruff check src --fix && uv run ruff format src tests
 uvx --from semgrep==1.170.0 semgrep scan --test --config semgrep/provider-qc.yml semgrep/tests/provider_qc_grouping.py
 uvx --from semgrep==1.170.0 semgrep scan --metrics=off --error --config semgrep/provider-qc.yml src/grounded_weather_forecast/dataset/matrix.py
+uvx --from semgrep==1.170.0 semgrep scan --test --config semgrep/artifact-pointer-paths.yml semgrep/tests/artifact_pointer_paths.py
+uvx --from semgrep==1.170.0 semgrep scan --metrics=off --error --config semgrep/artifact-pointer-paths.yml src/grounded_weather_forecast/artifacts.py
 uv run pyrefly check src && uv run ty check src
 uv run lizard -Eduplicate -C 27 -x "*/dashboard/assets/*" src
 uv run pytest tests/ --cov=src --cov-report=term-missing

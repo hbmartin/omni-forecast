@@ -76,7 +76,9 @@ class TestLeaderboard:
         keys = winners.select("product", "variable", "lead_bucket")
         assert keys.unique().height == winners.height
 
-    def test_concatenated_truth_targets_stay_separate_slices(self, scores):
+    def test_concatenated_truth_targets_stay_separate_slices(
+        self, scores: pl.DataFrame
+    ) -> None:
         single = leaderboard(scores)
         mixed = leaderboard(
             pl.concat([scores, scores.with_columns(pl.lit("mean").alias("semantics"))])
