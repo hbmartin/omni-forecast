@@ -221,9 +221,14 @@ class ArtifactStore:
                     msg = f"corrupt artifact pointer at {path}"
                     raise ArtifactError(msg)
                 # Every field becomes a path segment under the store root, so
-                # a separator or dot-segment would let a crafted pointer read
-                # or reclaim outside it.
-                if value in {".", ".."} or "/" in value or "\\" in value:
+                # a separator, drive marker, or dot-segment would let a crafted
+                # pointer read or reclaim outside it on a supported platform.
+                if (
+                    value in {".", ".."}
+                    or "/" in value
+                    or "\\" in value
+                    or ":" in value
+                ):
                     msg = f"unsafe artifact pointer field at {path}"
                     raise ArtifactError(msg)
                 pointer[field] = value

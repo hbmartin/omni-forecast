@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from pathlib import Path
 from threading import Barrier, Event
 
 import pytest
@@ -268,7 +269,9 @@ class TestConcurrentSaves:
         with pytest.raises(ArtifactError, match="inconsistent artifact pointer key"):
             store.read_latest()
 
-    def test_a_pointer_field_that_escapes_the_store_is_rejected(self, tmp_path):
+    def test_a_pointer_field_that_escapes_the_store_is_rejected(
+        self, tmp_path: Path
+    ) -> None:
         store = ArtifactStore(tmp_path / "state")
         store.save(
             fingerprint="safe",
@@ -283,6 +286,8 @@ class TestConcurrentSaves:
             ("fingerprint", "../outside"),
             ("method_id", "ewa/../../outside"),
             ("variable", "temp_c\\..\\outside"),
+            ("fingerprint", "C:"),
+            ("fingerprint", "D:outside"),
         ):
             tampered = {**entry, field: hostile}
             key = (

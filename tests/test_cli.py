@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from datetime import date
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -27,7 +28,7 @@ def test_backfill_start_and_truth_qc_days_are_parsed():
     assert truth_qc.days == 45
 
 
-def test_mean_semantics_binds_only_dual_semantics_variables(tmp_path):
+def test_mean_semantics_binds_only_dual_semantics_variables(tmp_path: Path) -> None:
     config = write_config(tmp_path)
 
     semantics = cli_module._semantics_by_variable(config, "mean", HOURLY_VARIABLES)
