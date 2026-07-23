@@ -41,6 +41,11 @@ def unapproved_hosts(lockfile: Path) -> set[str]:
         value = _url_value(field)
         if SCHEME_PREFIX_PATTERN.match(value) is None:
             findings.add(f"missing scheme: {value}")
+        elif URL_PATTERN.fullmatch(value) is None:
+            # A scheme followed by whitespace or quotes is not a fetchable URL,
+            # and the host scan below only sees its pre-whitespace prefix — an
+            # approved-host prefix must not launder the rest of the value.
+            findings.add(f"malformed URL: {value}")
     for match in URL_PATTERN.finditer(text):
         parsed = urlparse(match.group())
         if parsed.scheme != "https":
