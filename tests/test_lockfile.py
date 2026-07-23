@@ -111,6 +111,32 @@ def test_scheme_less_url_values_are_rejected(
 @pytest.mark.parametrize(
     ("entry", "findings"),
     [
+        (
+            'wheel = { url = "https://pypi.org/ evil.example.com/x.whl" }',
+            {"malformed URL: https://pypi.org/ evil.example.com/x.whl"},
+        ),
+        (
+            'sdist = { url = "https:// evil.example.com/x.tar.gz" }',
+            {
+                "malformed URL: https:// evil.example.com/x.tar.gz",
+                "hostless https source",
+            },
+        ),
+    ],
+)
+def test_scheme_bearing_but_malformed_url_values_are_rejected(
+    tmp_path: Path, entry: str, findings: set[str]
+) -> None:
+    """An approved-host prefix must not wave through a value with junk after it."""
+    lockfile = tmp_path / "uv.lock"
+    lockfile.write_text(entry, encoding="utf-8")
+
+    assert unapproved_hosts(lockfile) == findings
+
+
+@pytest.mark.parametrize(
+    ("entry", "findings"),
+    [
         ('wheel = { url = "http://" }', {"http scheme", "hostless http source"}),
         ('sdist = { url = "file://" }', {"file scheme", "hostless file source"}),
     ],
